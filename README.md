@@ -21,6 +21,10 @@ It also writes each attendee a ready-to-paste MCP client configuration.
 ## Requirements
 
 - **PowerShell 7.0+** (`pwsh`). Works on Windows, macOS and Linux.
+  Install on macOS with `brew install --cask powershell`.
+- The entry-point scripts are executable, so `./src/<script>.ps1` works from
+  bash/zsh. If you cloned in a way that dropped the mode bit, or you are on
+  Windows, invoke them as `pwsh ./src/<script>.ps1` instead.
 - No external PowerShell modules — everything is plain REST against documented endpoints.
 - An Entra ID app registration, plus tenant roles. See [docs/app-registration.md](docs/app-registration.md).
 
@@ -113,6 +117,16 @@ roles rather than a service principal's grants:
   access to the Power Platform BAP API.
 - No "Authorized Microsoft Entra apps" entry in the Business Central admin center.
 - No client secret to store, rotate, or keep out of source control.
+
+**Conditional Access can veto DeviceCode outright.** A device-code sign-in is an
+ordinary browser sign-in from an unmanaged process, so grant controls like
+*Require compliant device*, *Require approved client app* or *Require app
+protection policy* can never be satisfied by it — the sign-in succeeds and the
+token is then refused (`AADSTS53000`, `AADSTS53002`, `AADSTS530035`). No app
+registration change fixes that. Either exclude the application from the policy,
+or use `-AuthMode ClientSecret`: client credentials are not subject to
+user-targeted Conditional Access. The script detects these codes and says which
+applies.
 
 What it does need: the signing-in admin must hold **Global Administrator**, or
 **Dynamics 365 Administrator + Power Platform Administrator**. For the Business

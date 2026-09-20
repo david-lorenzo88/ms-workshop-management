@@ -172,7 +172,51 @@ function Request-WsDeviceCodeToken {
             'slow_down'             { $interval += 5; continue }
             'expired_token'         { throw 'Device code expired before sign-in completed. Re-run the script.' }
             'authorization_declined'{ throw 'Sign-in was declined by the user.' }
-            default                 { throw "Device code sign-in failed: $($poll.Content.error) - $($poll.Content.error_description)" }
+            default {
+                $description = if ($poll.Content.PSObject.Properties.Name -contains 'error_description') { $poll.Content.error_description } else { '' }
+
+                # A Conditional Access block authenticates the user successfully and
+                # then refuses the token. Device code flow is a plain browser sign-in,
+                # so device- and app-based grant controls can never be satisfied by it
+                # no matter how the app registration is configured - say so rather than
+                # leaving an AADSTS code to decode.
+                # Longest alternatives first: 53003 would otherwise shadow 530034/530035.
+                if ($description -match 'AADSTS(530035|530034|53000|53001|53002|53003|50158)') {
+                    $code = $Matches[1]
+                    $meaning = switch ($code) {
+                        '53000'  { 'a policy requires a compliant or hybrid-joined device' }
+                        '53001'  { 'a policy requires a domain-joined device' }
+                        '53002'  { 'a policy requires an approved client application' }
+                        '530035' { 'a policy requires an Intune app protection policy' }
+                        '530034' { 'a policy requires remediation before access' }
+                        '50158'  { 'an external security challenge was not satisfied' }
+                        default  { 'a Conditional Access policy blocked token issuance' }
+                    }
+                    throw @"
+Sign-in succeeded but Conditional Access refused the token (AADSTS$code):
+$meaning.
+
+A PowerShell device-code sign-in is an ordinary browser sign-in from an
+unmanaged process, so device-compliance and app-protection grant controls
+cannot be satisfied by this flow at all. Changing the app registration will
+not help.
+
+Confirm which policy is responsible:
+  Microsoft Entra admin center > Monitoring > Sign-in logs, find this attempt,
+  open the Conditional Access tab, and look for the policy showing "Failure".
+
+Then either:
+  1. Exclude this application from that policy (Conditional Access > the policy >
+     Target resources > Exclude), which is the narrow, reversible option; or
+  2. Switch to app-only authentication with -AuthMode ClientSecret. Client
+     credentials are not subject to user-targeted Conditional Access, but it
+     needs the extra setup in docs/app-registration.md (steps 3b, 3c and 4).
+
+Service response: $description
+"@
+                }
+                throw "Device code sign-in failed: $($poll.Content.error) - $description"
+            }
         }
     }
     throw 'Device code sign-in timed out.'

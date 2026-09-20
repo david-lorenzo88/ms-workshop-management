@@ -1,4 +1,10 @@
+#!/usr/bin/env pwsh
 #Requires -Version 7.0
+# NOTE: the shebang makes this directly executable (./src/<script>.ps1) on macOS
+# and Linux. The cost is that Get-Help falls back to auto-generated syntax for
+# .SYNOPSIS, because comment-based help must be the very first thing in a file.
+# .DESCRIPTION, .PARAMETER and .EXAMPLE still render. Do not remove the shebang
+# to 'fix' the synopsis - being runnable matters more.
 <#
 .SYNOPSIS
     Generates an attendee CSV for New-WorkshopUser.ps1.
