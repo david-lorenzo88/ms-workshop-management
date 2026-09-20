@@ -43,6 +43,10 @@ param(
     # registration. Power Platform environment creation needs this.
     [string[]]$UseAzureCliFor = @(),
     [int]$AttendeeCount = 10,
+    # A known-working account to copy the licence set from. Some Business
+    # Central SKUs are add-ons that do not provision a usable user alone, so
+    # comparing against someone who already works is the reliable check.
+    [string]$ReferenceUser,
     [ValidateSet('Debug', 'Info', 'Warn', 'Error')][string]$LogLevel = 'Warn'
 )
 
@@ -198,6 +202,27 @@ if ($graphOk) {
             }
             else {
                 Add-Check -Area 'Graph' -Name "SKU $part" -Status 'PASS' -Detail "$($sku.Available) seat(s) free"
+            }
+        }
+    }
+
+    if ($ReferenceUser) {
+        Invoke-Check -Area 'Graph' -Name 'Reference user' -Remedy 'Check the UPN, or that the account exists.' -Probe {
+            $script:referenceSkus = Get-WsUserLicense -UserPrincipalName $ReferenceUser
+            if ($null -eq $script:referenceSkus) { throw "User '$ReferenceUser' was not found." }
+            "$ReferenceUser holds: $(($script:referenceSkus | Sort-Object) -join ', ')"
+        } | Out-Null
+
+        if (Get-Variable -Name referenceSkus -Scope Script -ErrorAction SilentlyContinue) {
+            $configured = @(Cfg 'licenses.skuPartNumbers' @())
+            $absent = @($script:referenceSkus | Where-Object { $_ -notin $configured })
+            if ($absent.Count -gt 0) {
+                Add-Check -Area 'Graph' -Name 'Licence parity' -Status 'WARN' `
+                    -Detail "reference user also has: $(($absent | Sort-Object) -join ', ')" `
+                    -Remedy ("Attendees may need these too. To match exactly:`n  pwsh ./src/Set-WorkshopConfig.ps1 -Licenses " + (($script:referenceSkus | Sort-Object) -join ','))
+            }
+            else {
+                Add-Check -Area 'Graph' -Name 'Licence parity' -Status 'PASS' -Detail 'config covers every SKU the reference user holds'
             }
         }
     }

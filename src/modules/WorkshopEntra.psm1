@@ -193,6 +193,26 @@ function Set-WsUserLicense {
     return $result
 }
 
+function Get-WsUserLicense {
+    <#
+    .SYNOPSIS
+        Returns the SKU part numbers currently assigned to a user.
+    .DESCRIPTION
+        Useful for copying a known-working account's licence set onto a roster:
+        some Business Central SKUs are add-ons that do not provision a usable
+        user on their own.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$UserPrincipalName)
+
+    $uri = '{0}/users/{1}/licenseDetails' -f $script:GraphBase, [uri]::EscapeDataString($UserPrincipalName)
+    $result = Invoke-WsRestMethod -Uri $uri -Headers (Get-WsAuthHeader -Resource Graph) `
+        -TolerateStatus @(404) -Context 'entra'
+
+    if ($result.StatusCode -eq 404) { return $null }
+    return @($result.Content.value | ForEach-Object { $_.skuPartNumber })
+}
+
 function Get-WsTenantDomain {
     <#
     .SYNOPSIS
@@ -240,4 +260,5 @@ function Get-WsTenantInfo {
 }
 
 Export-ModuleMember -Function Get-WsEntraUser, New-WsEntraUser, Get-WsSubscribedSku, Set-WsUserLicense,
+    Get-WsUserLicense,
     Get-WsTenantDomain, Get-WsTenantInfo

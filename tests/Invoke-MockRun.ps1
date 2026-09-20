@@ -101,9 +101,17 @@ function global:Invoke-WebRequest {
                 ) }
         }
         '/v1\.0/users/([^/?]+)/licenseDetails' {
-            $id = $Matches[1]
+            $id = [uri]::UnescapeDataString($Matches[1])
+            # A known-working account to compare a roster against.
+            if ($id -eq 'reference@contoso.onmicrosoft.com') {
+                return reply 200 @{ value = @(
+                        @{ skuId = 'sku-bc-premium'; skuPartNumber = 'DYN365_BUSCENTRAL_PREMIUM' }
+                        @{ skuId = 'sku-o365'; skuPartNumber = 'O365_BUSINESS_PREMIUM' }
+                        @{ skuId = 'sku-flow'; skuPartNumber = 'FLOW_FREE' }
+                    ) }
+            }
             $held = if ($global:MockState.Licenses.ContainsKey($id)) { $global:MockState.Licenses[$id] } else { @() }
-            return reply 200 @{ value = @($held | ForEach-Object { @{ skuId = $_ } }) }
+            return reply 200 @{ value = @($held | ForEach-Object { @{ skuId = $_; skuPartNumber = $_ } }) }
         }
         '/v1\.0/users/([^/?]+)/assignLicense' {
             $id = $Matches[1]
@@ -396,6 +404,17 @@ Assert ($userListGets.Count -le 4) "BC user list fetched for the cohort, not per
 
 $syncCalls = @($pass1Requests | Where-Object { $_.Method -eq 'POST' -and $_.Uri -match 'getNewUsersFromOffice365' })
 Assert ($syncCalls.Count -le 2) "sync triggered once per run, not per attendee (saw $($syncCalls.Count))"
+
+# Comparing a roster's licences against an account that already works is the
+# reliable way to catch an add-on SKU that cannot provision a user on its own.
+$refOut = & (Join-Path $root 'src' 'Test-WorkshopSetup.ps1') -ConfigPath $configPath `
+    -AttendeeCount 10 -ReferenceUser 'reference@contoso.onmicrosoft.com' 6>$null
+$refRows = @($refOut | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Status' })
+$parity = @($refRows | Where-Object { $_.Check -eq 'Licence parity' }) | Select-Object -First 1
+Assert ($null -ne $parity) 'reference-user comparison produces a parity row'
+Assert ($parity.Status -eq 'WARN' -and $parity.Detail -match 'O365_BUSINESS_PREMIUM') 'parity names the SKU the roster is missing'
+Assert ($parity.Detail -notmatch 'DYN365_BUSCENTRAL_PREMIUM') 'parity ignores SKUs the config already covers'
+Assert ($parity.Remedy -match 'Set-WorkshopConfig.ps1 -Licenses') 'parity hands back a ready-to-run fix'
 
 $pf = { param($name) @($preflight | Where-Object { $_.Check -eq $name }) | Select-Object -First 1 }
 Assert ((& $pf 'Token').Status -eq 'PASS') 'pre-flight acquires a Graph token'
