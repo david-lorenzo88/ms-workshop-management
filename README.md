@@ -33,15 +33,30 @@ It also writes each attendee a ready-to-paste MCP client configuration.
 cp config/workshop.config.example.json config/workshop.config.json
 #    edit tenantId, clientId, licences, environment names...
 
-# 2. Supply the client secret out-of-band (never in the config file)
-$env:WORKSHOP_CLIENT_SECRET = '<secret>'
+# 2. Check the setup before anything else. Read-only, and it prints the two
+#    things you need for the config: your verified domains and your SKUs.
+./src/Test-WorkshopSetup.ps1 -AttendeeCount 10 -AuthMode DeviceCode
 
-# 3. Dry run first - this changes nothing
-./src/New-WorkshopUser.ps1 -Csv data/attendees.csv -WhatIf
+# 3. Build the roster
+./src/New-AttendeeRoster.ps1 -Domain <your-verified-domain> -Count 10 -OutFile data/workshop-users.csv
 
-# 4. Provision for real
-./src/New-WorkshopUser.ps1 -Csv data/attendees.csv
+# 4. Dry run - this changes nothing
+./src/New-WorkshopUser.ps1 -Csv data/workshop-users.csv -AuthMode DeviceCode -WhatIf
+
+# 5. Provision for real
+./src/New-WorkshopUser.ps1 -Csv data/workshop-users.csv -AuthMode DeviceCode
 ```
+
+### Pre-flight check
+
+`Test-WorkshopSetup.ps1` is strictly read-only. It acquires a token for each of
+the three APIs, confirms the Business Central environment, companies and
+permission sets resolve, checks you have enough licence seats for the roster, and
+ends with a plain `READY TO PROVISION` / `NOT READY` verdict. Every failure comes
+with the specific remedy for that failure.
+
+It also prints your verified domains and your SKU part numbers with seat counts —
+the two values you cannot guess when filling in the configuration.
 
 ### Single attendee
 
@@ -89,7 +104,22 @@ ben.jones@contoso.com,Ben Jones,Ben,Jones,Developer,Workshop,DYN365_BUSCENTRAL_P
 | Mode | Flag | Use when |
 |---|---|---|
 | `ClientSecret` | default | Unattended runs. App-only, no prompts. |
-| `DeviceCode` | `-AuthMode DeviceCode` | You need Business Central to synchronise users on demand. |
+| `DeviceCode` | `-AuthMode DeviceCode` | Interactive. Fewer setup steps, and the only mode that can force a Business Central user sync. |
+
+**DeviceCode needs noticeably less setup**, because the APIs honour *your* admin
+roles rather than a service principal's grants:
+
+- No `New-PowerAppManagementApp` registration — that exists only for app-only
+  access to the Power Platform BAP API.
+- No "Authorized Microsoft Entra apps" entry in the Business Central admin center.
+- No client secret to store, rotate, or keep out of source control.
+
+What it does need: the signing-in admin must hold **Global Administrator**, or
+**Dynamics 365 Administrator + Power Platform Administrator**. For the Business
+Central step specifically, that admin must also be a **licensed Business Central
+user in the target environment with permission to manage users** — the automation
+API runs as a BC user, not merely as a tenant admin. `Test-WorkshopSetup.ps1`
+catches this before you find out mid-run.
 
 **Why DeviceCode matters:** Business Central's "get new users from Microsoft 365"
 action is [not supported under service-to-service authentication](https://learn.microsoft.com/dynamics365/business-central/dev-itpro/administration/itpro-introduction-to-automation-apis)
@@ -199,17 +229,18 @@ Get-WsSubscribedSku | Sort-Object SkuPartNumber | Format-Table
 
 ## Tests
 
-`tests/Invoke-MockRun.ps1` runs the whole orchestrator offline against a mocked
-Microsoft API. It shadows `Invoke-WebRequest`, so the real request building, retry,
+`tests/Invoke-MockRun.ps1` runs the whole orchestrator and the pre-flight checker
+offline against a mocked Microsoft API. It shadows `Invoke-WebRequest`, so the real request building, retry,
 status handling and JSON parsing all stay in the code path under test.
 
 ```powershell
 pwsh -File tests/Invoke-MockRun.ps1
 ```
 
-It asserts, among other things, that `-WhatIf` issues zero mutating calls, that
-re-running is idempotent, that `SUPER` is never assigned, and that every Developer
-environment carries `usedBy`.
+36 assertions cover, among other things: `-WhatIf` issuing zero mutating calls,
+re-runs being idempotent, `SUPER` never being assigned, every Developer
+environment carrying `usedBy`, a roster CSV with only the two required columns,
+and the pre-flight verdict printing at the default log level.
 
 ---
 

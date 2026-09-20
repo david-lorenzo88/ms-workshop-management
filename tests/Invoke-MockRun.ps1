@@ -76,6 +76,16 @@ function global:Invoke-WebRequest {
         'oauth2/v2\.0/token' { return reply 200 @{ access_token = 'mock.token.value'; expires_in = 3600 } }
 
         # ---- Microsoft Graph ----
+        '/v1\.0/organization' {
+            return reply 200 @{ value = @(@{ id = 'a664f2f7-ece9-47bd-a471-32a0806ed142'; displayName = 'Contoso Workshop'; countryLetterCode = 'ES' }) }
+        }
+        '/v1\.0/domains' {
+            return reply 200 @{ value = @(
+                    @{ id = 'contoso.onmicrosoft.com'; isVerified = $true; isDefault = $true; isInitial = $true }
+                    @{ id = 'contoso.com'; isVerified = $true; isDefault = $false; isInitial = $false }
+                    @{ id = 'pending.example'; isVerified = $false; isDefault = $false; isInitial = $false }
+                ) }
+        }
         '/v1\.0/subscribedSkus' {
             return reply 200 @{ value = @(
                     @{ skuId = 'sku-bc-premium'; skuPartNumber = 'DYN365_BUSCENTRAL_PREMIUM'; prepaidUnits = @{ enabled = 25 }; consumedUnits = 3; capabilityStatus = 'Enabled' }
@@ -213,6 +223,12 @@ $minimalCsv = Join-Path $env:MOCK_OUT 'minimal.csv'
 
 $pass3 = & $script -ConfigPath $configPath -Csv $minimalCsv -OutputDirectory $env:MOCK_OUT -LogLevel Warn
 
+Write-Host "`n########## PASS 4: pre-flight checker ##########`n" -ForegroundColor Magenta
+$preflightOut = & (Join-Path $root 'src' 'Test-WorkshopSetup.ps1') -ConfigPath $configPath -AttendeeCount 10 6>&1 |
+    Tee-Object -Variable preflightConsole
+$preflight = @($preflightOut | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Status' })
+$preflightText = ($preflightConsole | Out-String -Width 200)
+
 # --- assertions ------------------------------------------------------------------
 
 Write-Host "`n########## ASSERTIONS ##########`n" -ForegroundColor Magenta
@@ -305,6 +321,16 @@ $minimalEnv = @($global:MockState.Requests | Where-Object {
         $_.Body.properties.displayName -eq 'DEV - Minimal User'
     })
 Assert ($minimalEnv.Count -eq 1) 'minimal CSV still templates the environment name'
+
+$pf = { param($name) @($preflight | Where-Object { $_.Check -eq $name }) | Select-Object -First 1 }
+Assert ((& $pf 'Token').Status -eq 'PASS') 'pre-flight acquires a Graph token'
+Assert ((& $pf 'Verified domains').Detail -match 'contoso\.onmicrosoft\.com') 'pre-flight lists verified domains only'
+Assert ((& $pf 'Verified domains').Detail -notmatch 'pending\.example') 'pre-flight excludes unverified domains'
+Assert ((& $pf 'Environment').Status -eq 'PASS') 'pre-flight resolves the BC environment'
+Assert ((& $pf 'Permission sets').Status -eq 'PASS') 'pre-flight confirms D365 FULL ACCESS exists'
+Assert ((& $pf 'SKU DYN365_BUSCENTRAL_PREMIUM').Status -in 'PASS', 'WARN') 'pre-flight checks seat availability per SKU'
+Assert (@($preflight | Where-Object { $_.Status -eq 'FAIL' }).Count -eq 0) 'pre-flight reports no blocking problems against a healthy tenant'
+Assert ($preflightText -match 'READY TO PROVISION') 'pre-flight verdict prints even at the default log level'
 
 Write-Host ''
 if ($failures.Count -gt 0) {

@@ -111,7 +111,17 @@ Also confirm the tenant allows Developer environment creation:
 
 ---
 
-## 5. DeviceCode mode (optional)
+## 5. DeviceCode mode — the shortcut
+
+> **If you use `-AuthMode DeviceCode`, steps 3b, 3c and 4 above do not apply.**
+> Delegated calls are authorised by the signed-in administrator's own roles, so
+> there is no service principal to register with Power Platform and no app to
+> authorise inside Business Central. You also never handle a client secret.
+>
+> The catch: for the Business Central step the signing-in admin must be a
+> **licensed BC user in the target environment with rights to manage users** —
+> the automation API runs as a Business Central user, not merely as a tenant
+> admin. Run `./src/Test-WorkshopSetup.ps1` to confirm before workshop day.
 
 Use `-AuthMode DeviceCode` when you want Business Central to synchronise users on
 demand rather than waiting for its periodic sync.

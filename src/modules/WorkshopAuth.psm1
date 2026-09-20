@@ -44,7 +44,8 @@ function Initialize-WsAuth {
         [Parameter(Mandatory)][string]$ClientId,
         [string]$ClientSecret,
         [ValidateSet('ClientSecret', 'DeviceCode')][string]$Mode = 'ClientSecret',
-        [string]$AuthorityHost = 'https://login.microsoftonline.com'
+        [string]$AuthorityHost = 'https://login.microsoftonline.com',
+        [hashtable]$ScopeOverride
     )
 
     if ($Mode -eq 'ClientSecret' -and [string]::IsNullOrWhiteSpace($ClientSecret)) {
@@ -61,6 +62,9 @@ function Initialize-WsAuth {
         Cache        = @{}
         RefreshToken = $null
         Account      = $null
+        # Optional per-resource scope overrides, for tenants where the
+        # '{resource}/.default' form is not what the app registration expects.
+        ScopeOverride = $ScopeOverride
     }
 
     Write-WsLog "Auth context ready (tenant $TenantId, mode $Mode)" -Level Debug -Context 'auth'
@@ -193,6 +197,9 @@ function Get-WsToken {
     }
 
     $scope = '{0}/.default' -f (Get-WsResourceUri -Resource $Resource)
+    if ($null -ne $script:Auth.ScopeOverride -and $script:Auth.ScopeOverride.ContainsKey($Resource)) {
+        $scope = $script:Auth.ScopeOverride[$Resource]
+    }
 
     $token = if ($script:Auth.Mode -eq 'ClientSecret') {
         Request-WsClientCredentialsToken -Scope $scope
@@ -209,8 +216,17 @@ function Get-WsToken {
         ExpiresOn   = (Get-Date).AddSeconds($expiresIn)
     }
 
-    if ($null -eq $script:Auth.Account -and $token.PSObject.Properties.Name -contains 'id_token') {
-        $script:Auth.Account = Get-WsTokenClaim -Token $token.access_token -Claim 'upn'
+    # Record and announce the effective identity once. Creating accounts as the
+    # wrong administrator is expensive to undo, so make it visible up front.
+    if ($null -eq $script:Auth.Account) {
+        foreach ($claim in 'upn', 'unique_name', 'preferred_username', 'app_displayname', 'appid') {
+            $value = Get-WsTokenClaim -Token $token.access_token -Claim $claim
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $script:Auth.Account = $value
+                Write-WsLog "Acting as: $value" -Level Success -Context 'auth'
+                break
+            }
+        }
     }
 
     Write-WsLog "Acquired $Resource token (valid ${expiresIn}s)" -Level Debug -Context 'auth'
@@ -255,5 +271,15 @@ function Get-WsAuthMode {
     return $script:Auth.Mode
 }
 
+function Get-WsSignedInAccount {
+    <#
+    .SYNOPSIS
+        Returns the identity tokens are currently being issued for, once one has
+        been acquired.
+    #>
+    Assert-WsAuthInitialized
+    return $script:Auth.Account
+}
+
 Export-ModuleMember -Function Initialize-WsAuth, Get-WsToken, Get-WsAuthHeader, Get-WsTokenClaim,
-    Get-WsResourceUri, Get-WsAuthMode
+    Get-WsResourceUri, Get-WsAuthMode, Get-WsSignedInAccount

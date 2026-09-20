@@ -193,4 +193,51 @@ function Set-WsUserLicense {
     return $result
 }
 
-Export-ModuleMember -Function Get-WsEntraUser, New-WsEntraUser, Get-WsSubscribedSku, Set-WsUserLicense
+function Get-WsTenantDomain {
+    <#
+    .SYNOPSIS
+        Lists the tenant's domains, flagging which are verified and which is default.
+    .DESCRIPTION
+        User principal names must use a verified domain, so this is the first thing
+        to check when building a roster.
+    #>
+    [CmdletBinding()]
+    param([switch]$VerifiedOnly)
+
+    $domains = (Invoke-WsRestMethod -Uri "$script:GraphBase/domains" `
+            -Headers (Get-WsAuthHeader -Resource Graph) -Context 'entra').Content.value
+
+    $result = $domains | ForEach-Object {
+        [pscustomobject]@{
+            Name        = $_.id
+            IsVerified  = $_.isVerified
+            IsDefault   = $_.isDefault
+            IsInitial   = $_.isInitial
+        }
+    }
+    if ($VerifiedOnly) { $result = $result | Where-Object { $_.IsVerified } }
+    return $result
+}
+
+function Get-WsTenantInfo {
+    <#
+    .SYNOPSIS
+        Returns the tenant's display name and default country, for confirming you
+        are pointed at the right tenant before provisioning.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $org = (Invoke-WsRestMethod -Uri "$script:GraphBase/organization" `
+            -Headers (Get-WsAuthHeader -Resource Graph) -Context 'entra').Content.value |
+        Select-Object -First 1
+
+    return [pscustomobject]@{
+        Id          = $org.id
+        DisplayName = $org.displayName
+        Country     = $org.countryLetterCode
+    }
+}
+
+Export-ModuleMember -Function Get-WsEntraUser, New-WsEntraUser, Get-WsSubscribedSku, Set-WsUserLicense,
+    Get-WsTenantDomain, Get-WsTenantInfo
