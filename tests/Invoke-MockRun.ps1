@@ -225,6 +225,8 @@ Write-Host "`n########## PASS 1: fresh provisioning ##########`n" -ForegroundCol
 $pass1 = & $script -ConfigPath $configPath -Csv (Join-Path $root 'data' 'attendees.example.csv') `
     -OutputDirectory $env:MOCK_OUT -LogLevel Info
 
+$pass1Requests = @($global:MockState.Requests)
+
 Write-Host "`n########## PASS 2: re-run (idempotency) ##########`n" -ForegroundColor Magenta
 $pass2 = & $script -ConfigPath $configPath -Csv (Join-Path $root 'data' 'attendees.example.csv') `
     -OutputDirectory $env:MOCK_OUT -LogLevel Info
@@ -383,6 +385,17 @@ Assert ($syncStarted -eq $true) 'user sync reports success against the user-boun
 Assert ($syncPosts.Count -ge 1) 'a sync action was actually posted'
 Assert (@($syncPosts | Where-Object { $_.Uri -match 'users\([^)]+\)/Microsoft\.NAV\.' }).Count -ge 1) 'sync is bound to a user entity'
 Assert (@($syncPosts | Where-Object { $_.Uri -match 'users/Microsoft\.NAV\.' }).Count -eq 0) 'sync never uses the collection route that 404s'
+
+# Phases must run across the whole roster, not per attendee: the Business
+# Central user list should be fetched a handful of times for the cohort, not
+# once (or a timeout's worth) per person.
+$userListGets = @($pass1Requests | Where-Object {
+        $_.Method -eq 'GET' -and $_.Uri -match 'companies\([^)]+\)/users(\?|$)'
+    })
+Assert ($userListGets.Count -le 4) "BC user list fetched for the cohort, not per attendee (saw $($userListGets.Count) for 3 attendees)"
+
+$syncCalls = @($pass1Requests | Where-Object { $_.Method -eq 'POST' -and $_.Uri -match 'getNewUsersFromOffice365' })
+Assert ($syncCalls.Count -le 2) "sync triggered once per run, not per attendee (saw $($syncCalls.Count))"
 
 $pf = { param($name) @($preflight | Where-Object { $_.Check -eq $name }) | Select-Object -First 1 }
 Assert ((& $pf 'Token').Status -eq 'PASS') 'pre-flight acquires a Graph token'

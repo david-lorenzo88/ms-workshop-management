@@ -128,6 +128,84 @@ function Get-WsBcUser {
     } | Select-Object -First 1
 }
 
+function Get-WsBcUserMap {
+    <#
+    .SYNOPSIS
+        Fetches the environment's users once and indexes them by every identity
+        they might be matched on.
+    .DESCRIPTION
+        Looking users up one at a time re-fetches the whole collection per
+        attendee. For a roster this builds the index once instead.
+    .OUTPUTS
+        Hashtable keyed by lower-cased identity, valued with the user object.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$EnvironmentName,
+        [Parameter(Mandatory)][string]$CompanyId
+    )
+
+    $uri = '{0}/companies({1})/users' -f (Get-WsBcAutomationBase -EnvironmentName $EnvironmentName), $CompanyId
+    $users = @((Invoke-WsRestMethod -Uri $uri -Headers (Get-WsAuthHeader -Resource BusinessCentral) -Context 'bc').Content.value)
+
+    $map = @{}
+    foreach ($user in $users) {
+        foreach ($property in 'userName', 'contactEmail', 'authenticationEmail', 'displayName') {
+            if ($user.PSObject.Properties.Name -contains $property -and -not [string]::IsNullOrWhiteSpace($user.$property)) {
+                $key = ([string]$user.$property).Trim().ToLowerInvariant()
+                if (-not $map.ContainsKey($key)) { $map[$key] = $user }
+            }
+        }
+    }
+    return $map
+}
+
+function Wait-WsBcUserCohort {
+    <#
+    .SYNOPSIS
+        Waits for a whole roster to appear in Business Central, polling once per
+        interval for everyone rather than once per person.
+    .DESCRIPTION
+        Returns as soon as every requested user is present, and reports progress
+        so a long wait shows movement rather than silence.
+    .OUTPUTS
+        PSCustomObject with Map (identity -> user), Found and Missing (UPNs).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$EnvironmentName,
+        [Parameter(Mandatory)][string]$CompanyId,
+        [Parameter(Mandatory)][string[]]$UserPrincipalName,
+        [int]$TimeoutMinutes = 10,
+        [int]$PollSeconds = 20
+    )
+
+    $wanted   = @($UserPrincipalName | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $lastNotice = [datetime]::MinValue
+    $map = @{}
+
+    while ($true) {
+        $map     = Get-WsBcUserMap -EnvironmentName $EnvironmentName -CompanyId $CompanyId
+        $found   = @($wanted | Where-Object { $map.ContainsKey($_) })
+        $missing = @($wanted | Where-Object { -not $map.ContainsKey($_) })
+
+        if ($missing.Count -eq 0 -or (Get-Date) -ge $deadline -or $TimeoutMinutes -le 0) {
+            if ($missing.Count -eq 0 -and $wanted.Count -gt 0) {
+                Write-WsLog "All $($wanted.Count) user(s) are present in Business Central." -Level Success -Context 'bc'
+            }
+            return [pscustomobject]@{ Map = $map; Found = $found; Missing = $missing }
+        }
+
+        if (((Get-Date) - $lastNotice).TotalSeconds -ge 60) {
+            $remaining = [int]([math]::Max(0, ($deadline - (Get-Date)).TotalMinutes))
+            Write-WsLog "Business Central has $($found.Count) of $($wanted.Count) user(s) so far (up to ${remaining} more min)..." -Level Info -Context 'bc'
+            $lastNotice = Get-Date
+        }
+        Start-Sleep -Seconds $PollSeconds
+    }
+}
+
 function Sync-WsBcUsersFromEntra {
     <#
     .SYNOPSIS
@@ -396,5 +474,6 @@ function New-WsBcMcpClientConfig {
     }
 }
 
-Export-ModuleMember -Function Get-WsBcEnvironment, Get-WsBcEnvironmentList, Get-WsBcCompany, Get-WsBcUser, Sync-WsBcUsersFromEntra,
+Export-ModuleMember -Function Get-WsBcEnvironment, Get-WsBcEnvironmentList, Get-WsBcCompany,
+    Get-WsBcUserMap, Wait-WsBcUserCohort, Get-WsBcUser, Sync-WsBcUsersFromEntra,
     Wait-WsBcUser, Get-WsBcPermissionSet, Grant-WsBcPermission, New-WsBcMcpClientConfig, Get-WsBcAutomationBase

@@ -172,6 +172,28 @@ function Get-RowValue {
     return $value
 }
 
+function Invoke-AttendeeStep {
+    <#
+    .SYNOPSIS
+        Runs one phase's work for one attendee, recording a failure against that
+        attendee instead of aborting the phase for the rest of the roster.
+    #>
+    param(
+        [Parameter(Mandatory)]$Item,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+
+    if ($Item.Failed) { return }
+    try { & $Action }
+    catch {
+        $message = $_.Exception.Message
+        $Item.Record.Errors.Add($message)
+        $Item.Failed = $true
+        Write-WsLog "Failed for $($Item.Upn): $message" -Level Error
+        if ($StopOnError) { throw }
+    }
+}
+
 function New-StepResult {
     param([Parameter(Mandatory)][string[]]$Names)
     $result = [ordered]@{}
@@ -276,22 +298,16 @@ if ($bcEnabled) {
         throw "Company $($bcCompany.id) in '$bcEnvironment' has neither a display name nor a name; the MCP Company header cannot be built."
     }
     Write-WsLog "Using company '$bcCompanyLabel' ($($bcCompany.id))" -Level Info -Context 'bc'
-
-    # Kick the Microsoft 365 -> Business Central user sync once for the whole run
-    # rather than once per attendee: it is a tenant-wide operation.
-    $bcSyncStarted = Sync-WsBcUsersFromEntra -EnvironmentName $bcEnvironment -CompanyId $bcCompany.id -WhatIf:$isWhatIf
 }
-else { $bcSyncStarted = $false }
 
-# Once the sync has failed to deliver one attendee within the timeout, it will not
-# deliver the rest either. Fall back to a single lookup each so a large roster does
-# not spend the full timeout per person.
-$bcSyncTimedOut = $false
+# --- provisioning, one phase at a time ------------------------------------------
+# Phases run across the whole roster before moving on. Licences have to land for
+# everyone before a Business Central sync is worth starting, and the sync wait
+# then happens once for the cohort rather than once per attendee - which is the
+# difference between a couple of minutes and the timeout multiplied by ten.
 
-# --- provisioning loop ---------------------------------------------------------
-
-$report = [System.Collections.Generic.List[object]]::new()
 $stepNames = @('User', 'License', 'PowerPlatform', 'BusinessCentral')
+$items = [System.Collections.Generic.List[object]]::new()
 
 foreach ($attendee in $attendees) {
     $upn = ([string]$attendee.UserPrincipalName).Trim()
@@ -300,69 +316,80 @@ foreach ($attendee in $attendees) {
         continue
     }
 
-    Write-Host ''
-    Write-WsLog "=== $upn ===" -Level Step
+    $items.Add([pscustomobject]@{
+            Upn       = $upn
+            Attendee  = $attendee
+            EntraUser = $null
+            Failed    = $false
+            Record    = [ordered]@{
+                UserPrincipalName = $upn
+                DisplayName       = (Get-RowValue -Row $attendee -Name 'DisplayName')
+                ObjectId          = $null
+                Password          = $null
+                Licenses          = $null
+                DevEnvironment    = $null
+                DevEnvironmentId  = $null
+                BcPermissionSets  = $null
+                Steps             = New-StepResult -Names $stepNames
+                Errors            = [System.Collections.Generic.List[string]]::new()
+            }
+        })
+}
 
-    $record = [ordered]@{
-        UserPrincipalName = $upn
-        DisplayName       = (Get-RowValue -Row $attendee -Name 'DisplayName')
-        ObjectId          = $null
-        Password          = $null
-        Licenses          = $null
-        DevEnvironment    = $null
-        DevEnvironmentId  = $null
-        BcPermissionSets  = $null
-        Steps             = New-StepResult -Names $stepNames
-        Errors            = [System.Collections.Generic.List[string]]::new()
-    }
+# ---- Phase 1: Entra ID users ---------------------------------------------------
 
-    try {
-        # ---- Step 1: Entra ID user -------------------------------------------
-        $entraUser = $null
+Write-Host ''
+Write-WsLog "Phase 1/4  Microsoft 365 accounts ($($items.Count))" -Level Step
 
+foreach ($item in $items) {
+    Invoke-AttendeeStep -Item $item -Action {
         if ('User' -in $Steps) {
             $createParams = @{
-                UserPrincipalName             = $upn
-                DisplayName                   = if ($record.DisplayName) { $record.DisplayName } else { ($upn -split '@')[0] }
+                UserPrincipalName             = $item.Upn
+                DisplayName                   = if ($item.Record.DisplayName) { $item.Record.DisplayName } else { ($item.Upn -split '@')[0] }
                 UsageLocation                 = Get-Setting $config 'user.usageLocation' 'US'
                 PasswordLength                = [int](Get-Setting $config 'user.passwordLength' 20)
                 ForceChangePasswordNextSignIn = [bool](Get-Setting $config 'user.forceChangePasswordNextSignIn' $true)
             }
             foreach ($optional in 'GivenName', 'Surname', 'JobTitle', 'Department') {
-                $value = Get-RowValue -Row $attendee -Name $optional
+                $value = Get-RowValue -Row $item.Attendee -Name $optional
                 if ($null -ne $value) { $createParams[$optional] = $value }
             }
 
             $created = New-WsEntraUser @createParams -WhatIf:$isWhatIf
-            $entraUser = $created.User
-            $record.Password = $created.Password
-            $record.Steps.User = if ($created.Created) { 'Created' } elseif ($entraUser) { 'AlreadyExists' } else { 'WhatIf' }
+            $item.EntraUser = $created.User
+            $item.Record.Password = $created.Password
+            $item.Record.Steps.User = if ($created.Created) { 'Created' } elseif ($created.User) { 'AlreadyExists' } else { 'WhatIf' }
         }
         else {
-            $entraUser = Get-WsEntraUser -UserPrincipalName $upn
+            $item.EntraUser = Get-WsEntraUser -UserPrincipalName $item.Upn
         }
 
-        if ($null -ne $entraUser) { $record.ObjectId = $entraUser.id }
-
-        # Without an object ID (a genuine -WhatIf run, or a user that does not
-        # exist) the remaining steps have nothing to act on.
-        if ($null -eq $entraUser) {
-            if ($WhatIfPreference) {
-                Write-WsLog 'Remaining steps need a real user object; skipped under -WhatIf.' -Level Info
-            }
-            else {
-                throw "User '$upn' does not exist. Include the 'User' step to create it."
-            }
-            $report.Add([pscustomobject]$record)
-            continue
+        if ($null -ne $item.EntraUser) { $item.Record.ObjectId = $item.EntraUser.id }
+        elseif (-not $isWhatIf) {
+            throw "User '$($item.Upn)' does not exist. Include the 'User' step to create it."
         }
+    }
+}
 
-        # ---- Step 2: licences -------------------------------------------------
-        if ('License' -in $Steps) {
-            $rowLicenses = Get-RowValue -Row $attendee -Name 'Licenses'
-            # @() wraps the WHOLE if-statement: assigning a single-element array
-            # out of an if-block unrolls it to a scalar, and .Count on a String
-            # throws under StrictMode. One configured SKU used to crash here.
+# Without a real user object the later phases have nothing to act on.
+# Invoking a scriptblock sends its result through the pipeline, which unrolls
+# arrays - so every call site wraps it in @() to keep .Count usable.
+$live = { @($items | Where-Object { -not $_.Failed -and $null -ne $_.EntraUser }) }
+
+if ($isWhatIf -and @(& $live).Count -eq 0) {
+    Write-WsLog 'Remaining phases need real user objects; skipped under -WhatIf.' -Level Info
+}
+
+# ---- Phase 2: licences ---------------------------------------------------------
+
+if ('License' -in $Steps -and @(& $live).Count -gt 0) {
+    Write-Host ''
+    Write-WsLog "Phase 2/4  Licences ($(@(& $live).Count))" -Level Step
+
+    foreach ($item in @(& $live)) {
+        Invoke-AttendeeStep -Item $item -Action {
+            $rowLicenses = Get-RowValue -Row $item.Attendee -Name 'Licenses'
             $skus = @(if ($null -ne $rowLicenses) {
                     ($rowLicenses -split ';').Trim() | Where-Object { $_ }
                 }
@@ -370,38 +397,46 @@ foreach ($attendee in $attendees) {
                     Get-Setting $config 'licenses.skuPartNumbers' @()
                 })
 
-            if (-not $skus -or $skus.Count -eq 0) {
+            if ($skus.Count -eq 0) {
                 Write-WsLog 'No licence SKUs configured - skipping licence assignment.' -Level Warn -Context 'entra'
-                $record.Steps.License = 'NoSkusConfigured'
+                $item.Record.Steps.License = 'NoSkusConfigured'
+                return
             }
-            else {
-                $licenseResult = Set-WsUserLicense -UserId $entraUser.id -SkuPartNumber $skus `
-                    -IgnoreMissingSku:([bool](Get-Setting $config 'licenses.ignoreMissingSku' $false)) `
-                    -WhatIf:$isWhatIf
 
-                $record.Licenses = (@($licenseResult.Assigned) + @($licenseResult.AlreadyHeld)) -join ';'
-                $record.Steps.License = if ($licenseResult.Assigned.Count -gt 0) { "Assigned: $($licenseResult.Assigned -join ', ')" }
-                elseif ($licenseResult.AlreadyHeld.Count -gt 0) { 'AlreadyLicensed' }
-                else { 'NothingAssigned' }
+            $licenseResult = Set-WsUserLicense -UserId $item.EntraUser.id -SkuPartNumber $skus `
+                -IgnoreMissingSku:([bool](Get-Setting $config 'licenses.ignoreMissingSku' $false)) `
+                -WhatIf:$isWhatIf
 
-                foreach ($exhausted in $licenseResult.NoSeatsLeft) { $record.Errors.Add("No seats left for SKU $exhausted") }
-            }
+            $item.Record.Licenses = (@($licenseResult.Assigned) + @($licenseResult.AlreadyHeld)) -join ';'
+            $item.Record.Steps.License = if ($licenseResult.Assigned.Count -gt 0) { "Assigned: $($licenseResult.Assigned -join ', ')" }
+            elseif ($licenseResult.AlreadyHeld.Count -gt 0) { 'AlreadyLicensed' }
+            else { 'NothingAssigned' }
+
+            foreach ($exhausted in $licenseResult.NoSeatsLeft) { $item.Record.Errors.Add("No seats left for SKU $exhausted") }
         }
+    }
+}
 
-        # ---- Step 3: Power Platform Developer environment ---------------------
-        if ('PowerPlatform' -in $Steps -and [bool](Get-Setting $config 'powerPlatform.enabled' $true)) {
+# ---- Phase 3: Power Platform Developer environments ----------------------------
+
+if ('PowerPlatform' -in $Steps -and [bool](Get-Setting $config 'powerPlatform.enabled' $true) -and @(& $live).Count -gt 0) {
+    Write-Host ''
+    Write-WsLog "Phase 3/4  Power Platform environments ($(@(& $live).Count))" -Level Step
+
+    foreach ($item in @(& $live)) {
+        Invoke-AttendeeStep -Item $item -Action {
             $template = Get-Setting $config 'powerPlatform.displayNameTemplate' 'DEV - {DisplayName}'
             $envDisplayName = Expand-Template -Template $template -Values @{
-                DisplayName       = $record.DisplayName
-                UserPrincipalName = $upn
-                Alias             = ($upn -split '@')[0]
-                GivenName         = Get-RowValue -Row $attendee -Name 'GivenName'
-                Surname           = Get-RowValue -Row $attendee -Name 'Surname'
+                DisplayName       = $item.Record.DisplayName
+                UserPrincipalName = $item.Upn
+                Alias             = ($item.Upn -split '@')[0]
+                GivenName         = Get-RowValue -Row $item.Attendee -Name 'GivenName'
+                Surname           = Get-RowValue -Row $item.Attendee -Name 'Surname'
             }
 
             $envResult = New-WsDeveloperEnvironment `
                 -DisplayName   $envDisplayName `
-                -OwnerObjectId $entraUser.id `
+                -OwnerObjectId $item.EntraUser.id `
                 -TenantId      $resolvedTenantId `
                 -Location      (Get-Setting $config 'powerPlatform.location' 'europe') `
                 -CurrencyCode  (Get-Setting $config 'powerPlatform.currencyCode' 'EUR') `
@@ -410,43 +445,52 @@ foreach ($attendee in $attendees) {
                 -TimeoutMinutes ([int](Get-Setting $config 'powerPlatform.timeoutMinutes' 20)) `
                 -WhatIf:$isWhatIf
 
-            $record.DevEnvironment   = $envDisplayName
-            $record.DevEnvironmentId = $envResult.EnvironmentName
-            $record.Steps.PowerPlatform = if ($envResult.Created) { 'Created' } else { 'AlreadyExists' }
+            $item.Record.DevEnvironment   = $envDisplayName
+            $item.Record.DevEnvironmentId = $envResult.EnvironmentName
+            $item.Record.Steps.PowerPlatform = if ($envResult.Created) { 'Created' } else { 'AlreadyExists' }
         }
+    }
+}
 
-        # ---- Step 4: Business Central permissions -----------------------------
-        if ($bcEnabled) {
-            $permissionSets = @(Get-Setting $config 'businessCentral.permissionSets' @('D365 FULL ACCESS'))
-            if ([bool](Get-Setting $config 'businessCentral.grantMcpAdmin' $false)) {
-                # Lets the attendee author MCP Server configurations themselves.
-                # This is MCP configuration rights, not Business Central administration.
-                $permissionSets += 'MCP - ADMIN'
-            }
+# ---- Phase 4: Business Central --------------------------------------------------
 
-            # Only wait out the full timeout when a sync is actually running. If
-            # none started, nothing will arrive and the wait is pure dead time.
-            $waitMinutes = if ($bcSyncTimedOut) { 0 }
-            elseif (-not $bcSyncStarted) { 0 }
-            else { [int](Get-Setting $config 'businessCentral.waitForUserSyncMinutes' 10) }
-            $bcUser = Wait-WsBcUser -EnvironmentName $bcEnvironment -CompanyId $bcCompany.id `
-                -UserPrincipalName $upn -TimeoutMinutes $waitMinutes `
-                -PollSeconds ([int](Get-Setting $config 'businessCentral.userSyncPollSeconds' 20))
+if ($bcEnabled -and @(& $live).Count -gt 0) {
+    Write-Host ''
+    Write-WsLog "Phase 4/4  Business Central ($(@(& $live).Count))" -Level Step
+
+    # Start the sync now, with every licence already assigned, so one pass picks
+    # up the whole roster.
+    $bcSyncStarted = Sync-WsBcUsersFromEntra -EnvironmentName $bcEnvironment -CompanyId $bcCompany.id -WhatIf:$isWhatIf
+
+    $waitMinutes = if ($bcSyncStarted) { [int](Get-Setting $config 'businessCentral.waitForUserSyncMinutes' 10) } else { 0 }
+    $cohort = Wait-WsBcUserCohort -EnvironmentName $bcEnvironment -CompanyId $bcCompany.id `
+        -UserPrincipalName @(& $live | ForEach-Object { $_.Upn }) `
+        -TimeoutMinutes $waitMinutes `
+        -PollSeconds ([int](Get-Setting $config 'businessCentral.userSyncPollSeconds' 20))
+
+    $permissionSets = @(Get-Setting $config 'businessCentral.permissionSets' @('D365 FULL ACCESS'))
+    if ([bool](Get-Setting $config 'businessCentral.grantMcpAdmin' $false)) {
+        # Lets the attendee author MCP Server configurations themselves. This is
+        # MCP configuration authority, not Business Central administration.
+        $permissionSets += 'MCP - ADMIN'
+    }
+    $assignToAll = [bool](Get-Setting $config 'businessCentral.assignToAllCompanies' $true)
+
+    foreach ($item in @(& $live)) {
+        Invoke-AttendeeStep -Item $item -Action {
+            $bcUser = $cohort.Map[$item.Upn.ToLowerInvariant()]
 
             if ($null -eq $bcUser) {
-                $bcSyncTimedOut = $true
-                $record.Steps.BusinessCentral = 'UserNotSynced'
+                $item.Record.Steps.BusinessCentral = 'UserNotSynced'
                 $reason = if (-not $bcSyncStarted) {
                     "User is not in Business Central '$bcEnvironment', and no automatic sync is running. In Business Central go to Users > 'Update users from Microsoft 365', then re-run with -Steps BusinessCentral."
                 }
                 else {
-                    "User has not appeared in Business Central '$bcEnvironment' yet. Licences can take a few minutes to flow through. Re-run with -Steps BusinessCentral once they do."
+                    "User has not appeared in Business Central '$bcEnvironment' yet. Run Users > 'Update users from Microsoft 365' in Business Central, then re-run with -Steps BusinessCentral."
                 }
-                $record.Errors.Add($reason)
-                Write-WsLog "Business Central has not picked up $upn yet." -Level Warn -Context 'bc'
+                $item.Record.Errors.Add($reason)
             }
             else {
-                $assignToAll = [bool](Get-Setting $config 'businessCentral.assignToAllCompanies' $true)
                 $grantParams = @{
                     EnvironmentName          = $bcEnvironment
                     CompanyId                = $bcCompany.id
@@ -457,13 +501,12 @@ foreach ($attendee in $attendees) {
                 if (-not $assignToAll) { $grantParams.Company = $bcCompany.name }
 
                 $grant = Grant-WsBcPermission @grantParams -WhatIf:$isWhatIf
-                $record.BcPermissionSets = (@($grant.Granted) + @($grant.AlreadyHeld)) -join ';'
-                $record.Steps.BusinessCentral = if ($grant.Granted.Count -gt 0) { "Granted: $($grant.Granted -join ', ')" } else { 'AlreadyGranted' }
+                $item.Record.BcPermissionSets = (@($grant.Granted) + @($grant.AlreadyHeld)) -join ';'
+                $item.Record.Steps.BusinessCentral = if ($grant.Granted.Count -gt 0) { "Granted: $($grant.Granted -join ', ')" } else { 'AlreadyGranted' }
 
-                foreach ($missing in $grant.Unavailable) { $record.Errors.Add("Permission set not available in environment: $missing") }
+                foreach ($missing in $grant.Unavailable) { $item.Record.Errors.Add("Permission set not available in environment: $missing") }
             }
 
-            # Emit the attendee's MCP client configuration.
             if ([bool](Get-Setting $config 'businessCentral.mcp.emitClientConfig' $true)) {
                 $mcp = New-WsBcMcpClientConfig `
                     -TenantId          $resolvedTenantId `
@@ -474,21 +517,22 @@ foreach ($attendee in $attendees) {
                     -CallbackPort      ([int](Get-Setting $config 'businessCentral.mcp.callbackPort' 33418)) `
                     -ClientKind        (Get-Setting $config 'businessCentral.mcp.clientKind' 'ClaudeCode')
 
-                $mcpPath = Join-Path $outputDir ('mcp-{0}.json' -f (($upn -split '@')[0] -replace '[^A-Za-z0-9._-]', '_'))
+                $mcpPath = Join-Path $outputDir ('mcp-{0}.json' -f (($item.Upn -split '@')[0] -replace '[^A-Za-z0-9._-]', '_'))
                 $mcp.Config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $mcpPath -Encoding utf8
                 if (-not $isWhatIf) { Write-WsLog "MCP client config written to $mcpPath" -Level Success -Context 'bc' }
             }
         }
     }
-    catch {
-        $message = $_.Exception.Message
-        $record.Errors.Add($message)
-        Write-WsLog "Failed for ${upn}: $message" -Level Error
-        if ($StopOnError) { $report.Add([pscustomobject]$record); break }
-    }
 
-    $report.Add([pscustomobject]$record)
+    if ($cohort.Missing.Count -gt 0) {
+        Write-Host ''
+        Write-WsLog "$($cohort.Missing.Count) of $(@(& $live).Count) user(s) are not in Business Central yet." -Level Warn -Context 'bc'
+        Write-WsLog "In Business Central: Users > 'Update users from Microsoft 365', then re-run with -Steps BusinessCentral" -Level Warn -Context 'bc'
+    }
 }
+
+$report = [System.Collections.Generic.List[object]]::new()
+foreach ($item in $items) { $report.Add([pscustomobject]$item.Record) }
 
 # --- reporting ------------------------------------------------------------------
 

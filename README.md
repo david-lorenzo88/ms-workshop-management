@@ -16,6 +16,13 @@ For each attendee the toolkit:
 
 It also writes each attendee a ready-to-paste MCP client configuration.
 
+Work runs **phase by phase across the whole roster**, not attendee by attendee:
+every account is created, then every licence assigned, then every environment,
+and only then Business Central. That ordering matters — Business Central cannot
+see a user until their licence has landed, so the sync is worth starting only
+once every licence is in place, and the wait for it then happens once for the
+cohort rather than once per person.
+
 ---
 
 ## Requirements
@@ -70,6 +77,17 @@ the two values you cannot guess when filling in the configuration.
 
 ```powershell
 ./src/New-WorkshopUser.ps1 -UserPrincipalName anna@contoso.com -DisplayName 'Anna Smith'
+```
+
+### Splitting the run around a manual step
+
+Business Central's user sync can be slow, or may need doing by hand. Provision
+everything else first, sync, then come back for permissions:
+
+```powershell
+pwsh ./src/New-WorkshopUser.ps1 -Csv data/attendees.csv -Steps User,License,PowerPlatform
+#   then in Business Central: Users > "Update users from Microsoft 365"
+pwsh ./src/New-WorkshopUser.ps1 -Csv data/attendees.csv -Steps BusinessCentral
 ```
 
 ### Re-run only one step
