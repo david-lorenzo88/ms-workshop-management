@@ -62,6 +62,7 @@ $UseAzureCliFor = Resolve-WsListArgument -Value $UseAzureCliFor -Name 'UseAzureC
     -Allowed @('Graph', 'PowerPlatform', 'BusinessCentral')
 
 $checks = [System.Collections.Generic.List[object]]::new()
+$script:placementInfo = $null
 
 function Add-Check {
     param(
@@ -197,8 +198,8 @@ if ($graphOk) {
             }
             elseif ($sku.Available -lt $AttendeeCount) {
                 Add-Check -Area 'Graph' -Name "SKU $part" -Status 'WARN' `
-                    -Detail "$($sku.Available) seat(s) free, need $AttendeeCount" `
-                    -Remedy 'Buy more seats, or reduce the roster.'
+                    -Detail "$($sku.Available) free, roster is $AttendeeCount (fine if attendees already hold it)" `
+                    -Remedy "Seats are compared against the whole roster. An attendee who already holds $part does not consume another, so this is only a problem for attendees who do not have it yet. Otherwise buy more seats or shorten the roster."
             }
             else {
                 Add-Check -Area 'Graph' -Name "SKU $part" -Status 'PASS' -Detail "$($sku.Available) seat(s) free"
@@ -275,6 +276,7 @@ gives AmbiguousLocationSpecification.
   pwsh ./src/Set-WorkshopConfig.ps1 -MacroRegion <id>
 '@ -Probe {
         $placement = Get-WsPowerPlatformLocation
+        $script:placementInfo = $placement
         if ($placement.Mode -eq 'macroRegion') {
             $ids = @($placement.MacroRegions | ForEach-Object { $_.Id })
             $chosen = Cfg 'powerPlatform.macroRegion'
@@ -387,6 +389,15 @@ if (Get-Variable -Name domains -Scope Script -ErrorAction SilentlyContinue) {
     Write-Host 'Verified domains - use one of these for attendee UPNs' -ForegroundColor Cyan
     $script:domains | Sort-Object { -not $_.IsDefault }, Name |
         Format-Table Name, IsDefault, IsInitial -AutoSize | Out-String -Width 200 | Write-Host
+}
+
+if ($null -ne $script:placementInfo -and $script:placementInfo.Mode -eq 'macroRegion') {
+    Write-Host 'Macro regions - this tenant places environments by macroRegion, not location' -ForegroundColor Cyan
+    $script:placementInfo.MacroRegions |
+        Format-Table @{ Name = 'MacroRegionId'; Expression = { $_.Id } }, DisplayName -AutoSize |
+        Out-String -Width 200 | Write-Host
+    Write-Host '  pwsh ./src/Set-WorkshopConfig.ps1 -MacroRegion <MacroRegionId>' -ForegroundColor DarkGray
+    Write-Host ''
 }
 
 if (Get-Variable -Name skus -Scope Script -ErrorAction SilentlyContinue) {

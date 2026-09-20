@@ -102,7 +102,7 @@ function Resolve-WsEnvironmentPlacement {
 
     if (-not [string]::IsNullOrWhiteSpace($MacroRegion)) {
         if ($validIds.Count -gt 0 -and $MacroRegion -notin $validIds) {
-            throw "'$MacroRegion' is not a valid macro region for this tenant. Available: $($validIds -join ', ')."
+            throw "'$MacroRegion' is not a valid macro region for this tenant. Available: $($validIds -join ', ')"
         }
         return [pscustomobject]@{ Key = 'macroRegion'; Value = $MacroRegion }
     }
@@ -120,9 +120,8 @@ function Resolve-WsEnvironmentPlacement {
     }
 
     throw @"
-This tenant provisions environments by macro region, so 'location' cannot be used.
-Set powerPlatform.macroRegion to one of: $($validIds -join ', ')
-
+Tenant provisions by macro region; set powerPlatform.macroRegion to one of: $($validIds -join ', ')
+'location' cannot be used on this tenant - the two keys are mutually exclusive.
   pwsh ./src/Set-WorkshopConfig.ps1 -MacroRegion <id>
 "@
 }
