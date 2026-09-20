@@ -137,6 +137,16 @@ if ($effectiveMode -eq 'ClientSecret') {
 Initialize-WsAuth -TenantId $effectiveTenant -ClientId $effectiveClient -ClientSecret $secret `
     -Mode $effectiveMode -AzureCliResources $UseAzureCliFor | Out-Null
 Write-Host "Tenant $effectiveTenant | client $effectiveClient | auth $effectiveMode" -ForegroundColor DarkGray
+
+# Echo the settings actually in force. Without this, a config that was never
+# edited looks exactly like a tenant that is missing things.
+$resolvedConfigPath = try { (Resolve-Path -LiteralPath $ConfigPath -ErrorAction Stop).Path } catch { "$ConfigPath (NOT FOUND)" }
+Write-Host "Config  $resolvedConfigPath" -ForegroundColor DarkGray
+Write-Host ("        licences: {0} | bcEnvironment: {1} | powerPlatform: {2}" -f `
+        ((@(Cfg 'licenses.skuPartNumbers' @()) -join ', ')  ),
+    (Cfg 'businessCentral.environmentName' '(unset)'),
+    (Cfg 'powerPlatform.enabled' $true)) -ForegroundColor DarkGray
+Write-Host "        edit with: pwsh ./src/Set-WorkshopConfig.ps1 -Show" -ForegroundColor DarkGray
 Write-Host ''
 
 # --- Microsoft Graph -----------------------------------------------------------

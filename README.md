@@ -33,9 +33,10 @@ It also writes each attendee a ready-to-paste MCP client configuration.
 ## Quick start
 
 ```powershell
-# 1. Configure
-cp config/workshop.config.example.json config/workshop.config.json
-#    edit tenantId, clientId, licences, environment names...
+# 1. Configure. Set-WorkshopConfig creates the file from the example on first
+#    use, changes only what you pass, and prints a before/after diff.
+pwsh ./src/Set-WorkshopConfig.ps1 -TenantId <guid> -ClientId <guid> -AuthMode InteractiveBrowser
+pwsh ./src/Set-WorkshopConfig.ps1 -Show          # what is in force right now
 
 # 2. Check the setup before anything else. Read-only, and it prints the two
 #    things you need for the config: your verified domains and your SKUs.
@@ -50,6 +51,9 @@ cp config/workshop.config.example.json config/workshop.config.json
 # 5. Provision for real
 ./src/New-WorkshopUser.ps1 -Csv data/workshop-users.csv -AuthMode InteractiveBrowser
 ```
+
+Every run echoes the config file it loaded and the settings in force, so a
+config you meant to edit but did not cannot masquerade as a broken tenant.
 
 ### Pre-flight check
 
