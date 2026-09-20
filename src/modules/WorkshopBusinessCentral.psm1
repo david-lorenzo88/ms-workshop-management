@@ -151,19 +151,51 @@ function Sync-WsBcUsersFromEntra {
 
     if (-not $PSCmdlet.ShouldProcess($EnvironmentName, 'Synchronise users from Microsoft 365')) { return $false }
 
-    $uri = '{0}/companies({1})/users/Microsoft.NAV.getNewUsersFromOffice365Async' -f `
-        (Get-WsBcAutomationBase -EnvironmentName $EnvironmentName), $CompanyId
+    $automationBase = Get-WsBcAutomationBase -EnvironmentName $EnvironmentName
 
-    $result = Invoke-WsRestMethod -Uri $uri -Method POST -Headers (Get-WsAuthHeader -Resource BusinessCentral) `
-        -Body @{} -TolerateStatus @(400, 403, 404) -Context 'bc'
+    # These actions are bound to a SINGLE user entity, not to the users
+    # collection - posting to .../users/Microsoft.NAV.<action> returns 404. The
+    # action is tenant-wide regardless of which user it is bound to, so bind it
+    # to the signed-in administrator where we can identify them.
+    $existing = @((Invoke-WsRestMethod -Uri ('{0}/companies({1})/users' -f $automationBase, $CompanyId) `
+                -Headers (Get-WsAuthHeader -Resource BusinessCentral) -Context 'bc').Content.value)
 
-    if (-not $result.Success) {
-        Write-WsLog "User sync request returned HTTP $($result.StatusCode); continuing without it." -Level Warn -Context 'bc'
+    if ($existing.Count -eq 0) {
+        Write-WsLog 'No existing Business Central users to bind the sync action to; skipping.' -Level Warn -Context 'bc'
         return $false
     }
 
-    Write-WsLog 'User synchronisation from Microsoft 365 started.' -Level Success -Context 'bc'
-    return $true
+    $account = Get-WsSignedInAccount
+    $anchor = $null
+    if (-not [string]::IsNullOrWhiteSpace($account)) {
+        $anchor = $existing | Where-Object {
+            $_.PSObject.Properties.Name -contains 'userName' -and $_.userName -ieq $account
+        } | Select-Object -First 1
+    }
+    if ($null -eq $anchor) { $anchor = $existing | Select-Object -First 1 }
+
+    # The synchronous variant is meant for delegated admins; the async one
+    # schedules a background job. Try async first, then fall back.
+    foreach ($action in 'getNewUsersFromOffice365Async', 'getNewUsersFromOffice365') {
+        $uri = '{0}/companies({1})/users({2})/Microsoft.NAV.{3}' -f `
+            $automationBase, $CompanyId, $anchor.userSecurityId, $action
+
+        $result = Invoke-WsRestMethod -Uri $uri -Method POST -Headers (Get-WsAuthHeader -Resource BusinessCentral) `
+            -Body @{} -TolerateStatus @(400, 403, 404, 405) -Context 'bc'
+
+        if ($result.Success) {
+            Write-WsLog "User synchronisation from Microsoft 365 started ($action)." -Level Success -Context 'bc'
+            return $true
+        }
+        Write-WsLog "$action returned HTTP $($result.StatusCode); trying the next option." -Level Debug -Context 'bc'
+    }
+
+    Write-WsLog @'
+Could not start the Microsoft 365 user sync automatically.
+Do it by hand instead: Business Central > Users > "Update users from Microsoft 365",
+then re-run with -Steps BusinessCentral.
+'@ -Level Warn -Context 'bc'
+    return $false
 }
 
 function Wait-WsBcUser {

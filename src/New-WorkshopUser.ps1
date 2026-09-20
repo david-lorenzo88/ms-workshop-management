@@ -270,8 +270,9 @@ if ($bcEnabled) {
 
     # Kick the Microsoft 365 -> Business Central user sync once for the whole run
     # rather than once per attendee: it is a tenant-wide operation.
-    Sync-WsBcUsersFromEntra -EnvironmentName $bcEnvironment -CompanyId $bcCompany.id -WhatIf:$isWhatIf | Out-Null
+    $bcSyncStarted = Sync-WsBcUsersFromEntra -EnvironmentName $bcEnvironment -CompanyId $bcCompany.id -WhatIf:$isWhatIf
 }
+else { $bcSyncStarted = $false }
 
 # Once the sync has failed to deliver one attendee within the timeout, it will not
 # deliver the rest either. Fall back to a single lookup each so a large roster does
@@ -414,7 +415,11 @@ foreach ($attendee in $attendees) {
                 $permissionSets += 'MCP - ADMIN'
             }
 
-            $waitMinutes = if ($bcSyncTimedOut) { 0 } else { [int](Get-Setting $config 'businessCentral.waitForUserSyncMinutes' 10) }
+            # Only wait out the full timeout when a sync is actually running. If
+            # none started, nothing will arrive and the wait is pure dead time.
+            $waitMinutes = if ($bcSyncTimedOut) { 0 }
+            elseif (-not $bcSyncStarted) { 0 }
+            else { [int](Get-Setting $config 'businessCentral.waitForUserSyncMinutes' 10) }
             $bcUser = Wait-WsBcUser -EnvironmentName $bcEnvironment -CompanyId $bcCompany.id `
                 -UserPrincipalName $upn -TimeoutMinutes $waitMinutes `
                 -PollSeconds ([int](Get-Setting $config 'businessCentral.userSyncPollSeconds' 20))
@@ -422,8 +427,14 @@ foreach ($attendee in $attendees) {
             if ($null -eq $bcUser) {
                 $bcSyncTimedOut = $true
                 $record.Steps.BusinessCentral = 'UserNotSynced'
-                $record.Errors.Add("User has not appeared in Business Central '$bcEnvironment' yet. Licences can take a few minutes to flow through. Re-run with -Steps BusinessCentral once they do.")
-                Write-WsLog "Business Central has not picked up $upn yet - re-run -Steps BusinessCentral later." -Level Warn -Context 'bc'
+                $reason = if (-not $bcSyncStarted) {
+                    "User is not in Business Central '$bcEnvironment', and no automatic sync is running. In Business Central go to Users > 'Update users from Microsoft 365', then re-run with -Steps BusinessCentral."
+                }
+                else {
+                    "User has not appeared in Business Central '$bcEnvironment' yet. Licences can take a few minutes to flow through. Re-run with -Steps BusinessCentral once they do."
+                }
+                $record.Errors.Add($reason)
+                Write-WsLog "Business Central has not picked up $upn yet." -Level Warn -Context 'bc'
             }
             else {
                 $assignToAll = [bool](Get-Setting $config 'businessCentral.assignToAllCompanies' $true)

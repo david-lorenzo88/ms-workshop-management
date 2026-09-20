@@ -28,6 +28,7 @@ $global:MockState = @{
     BcPerms      = @{}
     Licenses     = @{}
     BlankCompanyDisplayName = $false
+    SyncBoundToCollectionOnly = $false
 }
 
 # Pre-seed Business Central with the synced users so the wait loop resolves.
@@ -75,7 +76,11 @@ function global:Invoke-WebRequest {
     switch -Regex ($Uri) {
 
         # ---- token endpoint ----
-        'oauth2/v2\.0/token' { return reply 200 @{ access_token = 'mock.token.value'; expires_in = 3600 } }
+        'oauth2/v2\.0/devicecode' {
+            return reply 200 @{ device_code = 'mock-device-code'; user_code = 'MOCK123'
+                verification_uri = 'https://microsoft.com/devicelogin'; interval = 1; expires_in = 900 }
+        }
+        'oauth2/v2\.0/token' { return reply 200 @{ access_token = 'mock.token.value'; refresh_token = 'mock-refresh'; expires_in = 3600 } }
 
         # ---- Microsoft Graph ----
         '/v1\.0/organization' {
@@ -153,7 +158,13 @@ function global:Invoke-WebRequest {
             $display = if ($global:MockState.BlankCompanyDisplayName) { '' } else { 'CRONUS USA, Inc.' }
             return reply 200 @{ value = @(@{ id = 'c0000001-0000-0000-0000-00000000000c'; name = 'CRONUS'; displayName = $display }) }
         }
-        'getNewUsersFromOffice365Async' { return reply 200 @{ status = 'Scheduled' } }
+        # Bound to a single user entity: .../users({id})/Microsoft.NAV.<action>.
+        # The collection form 404s on the real service.
+        'users\([^)]+\)/Microsoft\.NAV\.getNewUsersFromOffice365' {
+            if ($global:MockState.SyncBoundToCollectionOnly) { return reply 404 @{ error = @{ code = 'NotFound' } } }
+            return reply 204 $null
+        }
+        'users/Microsoft\.NAV\.getNewUsersFromOffice365' { return reply 404 @{ error = @{ code = 'NotFound' } } }
         'companies\([^)]+\)/users$' { return reply 200 @{ value = @($global:MockState.BcUsers.Values) } }
         'companies\([^)]+\)/permissionSets' {
             return reply 200 @{ value = @(
@@ -355,6 +366,23 @@ $ppOffResult = & (Join-Path $root 'src' 'Test-WorkshopSetup.ps1') -ConfigPath $p
 $ppRows = @($ppOffResult | Where-Object { $_.Area -eq 'PowerPlatform' })
 Assert ($ppRows.Count -eq 1 -and $ppRows[0].Status -eq 'SKIP') 'disabled Power Platform step is skipped, not probed'
 Assert (@($ppOffResult | Where-Object { $_.Status -eq 'FAIL' }).Count -eq 0) 'disabling a step does not leave blocking failures'
+
+# The Microsoft 365 -> Business Central sync action is bound to a single user
+# entity. Posting to the collection (.../users/Microsoft.NAV.<action>) returns
+# 404 on the real service, which silently cost a ten-minute wait per attendee.
+$global:MockState.Requests.Clear()
+Initialize-WsAuth -TenantId '11111111-1111-1111-1111-111111111111' `
+    -ClientId '22222222-2222-2222-2222-222222222222' -Mode DeviceCode | Out-Null
+$syncStarted = Sync-WsBcUsersFromEntra -EnvironmentName 'SANDBOX-WORKSHOP' `
+    -CompanyId 'c0000001-0000-0000-0000-00000000000c'
+
+$syncPosts = @($global:MockState.Requests | Where-Object {
+        $_.Method -eq 'POST' -and $_.Uri -match 'getNewUsersFromOffice365'
+    })
+Assert ($syncStarted -eq $true) 'user sync reports success against the user-bound route'
+Assert ($syncPosts.Count -ge 1) 'a sync action was actually posted'
+Assert (@($syncPosts | Where-Object { $_.Uri -match 'users\([^)]+\)/Microsoft\.NAV\.' }).Count -ge 1) 'sync is bound to a user entity'
+Assert (@($syncPosts | Where-Object { $_.Uri -match 'users/Microsoft\.NAV\.' }).Count -eq 0) 'sync never uses the collection route that 404s'
 
 $pf = { param($name) @($preflight | Where-Object { $_.Check -eq $name }) | Select-Object -First 1 }
 Assert ((& $pf 'Token').Status -eq 'PASS') 'pre-flight acquires a Graph token'
