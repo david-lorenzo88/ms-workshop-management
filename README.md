@@ -39,16 +39,16 @@ cp config/workshop.config.example.json config/workshop.config.json
 
 # 2. Check the setup before anything else. Read-only, and it prints the two
 #    things you need for the config: your verified domains and your SKUs.
-./src/Test-WorkshopSetup.ps1 -AttendeeCount 10 -AuthMode DeviceCode
+./src/Test-WorkshopSetup.ps1 -AttendeeCount 10 -AuthMode InteractiveBrowser
 
 # 3. Build the roster
 ./src/New-AttendeeRoster.ps1 -Domain <your-verified-domain> -Count 10 -OutFile data/workshop-users.csv
 
 # 4. Dry run - this changes nothing
-./src/New-WorkshopUser.ps1 -Csv data/workshop-users.csv -AuthMode DeviceCode -WhatIf
+./src/New-WorkshopUser.ps1 -Csv data/workshop-users.csv -AuthMode InteractiveBrowser -WhatIf
 
 # 5. Provision for real
-./src/New-WorkshopUser.ps1 -Csv data/workshop-users.csv -AuthMode DeviceCode
+./src/New-WorkshopUser.ps1 -Csv data/workshop-users.csv -AuthMode InteractiveBrowser
 ```
 
 ### Pre-flight check
@@ -107,13 +107,33 @@ ben.jones@contoso.com,Ben Jones,Ben,Jones,Developer,Workshop,DYN365_BUSCENTRAL_P
 
 | Mode | Flag | Use when |
 |---|---|---|
-| `ClientSecret` | default | Unattended runs. App-only, no prompts. |
-| `DeviceCode` | `-AuthMode DeviceCode` | Interactive. Fewer setup steps, and the only mode that can force a Business Central user sync. |
+| `InteractiveBrowser` | `-AuthMode InteractiveBrowser` | **Start here.** Browser sign-in (authorization code + PKCE). Least setup, no secret, and works on tenants with security defaults on. |
+| `ClientSecret` | default | Unattended runs. App-only, no prompts, most setup. |
+| `DeviceCode` | `-AuthMode DeviceCode` | Headless terminals only. Blocked outright by security defaults. |
 
-**Check security defaults before choosing DeviceCode** (see the warning below) —
-on a new tenant it will simply be blocked. Where it is available, it needs
-noticeably less setup, because the APIs honour *your* admin roles rather than a
-service principal's grants:
+### Why InteractiveBrowser is the usual answer
+
+It is an ordinary browser sign-in, so it satisfies the MFA that security defaults
+require rather than being blocked the way device code flow is. Because the calls
+are delegated, the APIs honour *your* admin roles, which removes three setup
+steps that app-only auth needs:
+
+- no `New-PowerAppManagementApp` registration (and that module does not run on
+  macOS or Linux at all — it depends on .NET Framework);
+- no "Authorized Microsoft Entra apps" entry in the Business Central admin center;
+- no client secret to store or rotate.
+
+It is also the only mode that can trigger the Business Central user
+synchronisation on demand, because that operation is unavailable to app-only
+tokens.
+
+The app registration needs to be a **public client** with redirect URI
+`http://localhost:8400/` registered under *Mobile and desktop applications*, and
+the equivalent **delegated** permissions. See
+[docs/app-registration.md](docs/app-registration.md).
+
+Both delegated modes need less setup than app-only, because the APIs honour
+*your* admin roles rather than a service principal's grants:
 
 - No `New-PowerAppManagementApp` registration — that exists only for app-only
   access to the Power Platform BAP API.
@@ -123,10 +143,9 @@ service principal's grants:
 > **Security defaults block DeviceCode.** Since July 2026 new Microsoft Entra
 > tenants block device code flow as part of security defaults, and security
 > defaults cannot be scoped — there is no exclusion for an application, user or
-> group. If your tenant has them on, `-AuthMode ClientSecret` is your route, or
-> you turn security defaults off tenant-wide and rebuild the protection with
-> Conditional Access (Entra ID P1). Check under
-> **Entra ID > Overview > Properties > Manage security defaults**.
+> group. Use `-AuthMode InteractiveBrowser` instead: a normal browser sign-in is
+> permitted, and satisfies the MFA security defaults require. Check the setting
+> under **Entra ID > Overview > Properties > Manage security defaults**.
 
 **Conditional Access can veto DeviceCode outright.** A device-code sign-in is an
 ordinary browser sign-in from an unmanaged process, so grant controls like

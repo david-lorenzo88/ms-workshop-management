@@ -43,9 +43,10 @@ function Initialize-WsAuth {
         [Parameter(Mandatory)][string]$TenantId,
         [Parameter(Mandatory)][string]$ClientId,
         [string]$ClientSecret,
-        [ValidateSet('ClientSecret', 'DeviceCode')][string]$Mode = 'ClientSecret',
+        [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$Mode = 'ClientSecret',
         [string]$AuthorityHost = 'https://login.microsoftonline.com',
-        [hashtable]$ScopeOverride
+        [hashtable]$ScopeOverride,
+        [int]$RedirectPort = 8400
     )
 
     if ($Mode -eq 'ClientSecret' -and [string]::IsNullOrWhiteSpace($ClientSecret)) {
@@ -59,6 +60,8 @@ function Initialize-WsAuth {
         Mode         = $Mode
         TokenUri     = "$AuthorityHost/$TenantId/oauth2/v2.0/token"
         DeviceUri    = "$AuthorityHost/$TenantId/oauth2/v2.0/devicecode"
+        AuthorizeUri = "$AuthorityHost/$TenantId/oauth2/v2.0/authorize"
+        RedirectUri  = "http://localhost:$RedirectPort/"
         Cache        = @{}
         RefreshToken = $null
         Account      = $null
@@ -174,62 +177,216 @@ function Request-WsDeviceCodeToken {
             'authorization_declined'{ throw 'Sign-in was declined by the user.' }
             default {
                 $description = if ($poll.Content.PSObject.Properties.Name -contains 'error_description') { $poll.Content.error_description } else { '' }
-
-                # A Conditional Access block authenticates the user successfully and
-                # then refuses the token. Device code flow is a plain browser sign-in,
-                # so device- and app-based grant controls can never be satisfied by it
-                # no matter how the app registration is configured - say so rather than
-                # leaving an AADSTS code to decode.
-                # Longest alternatives first: 53003 would otherwise shadow 530034/530035.
-                if ($description -match 'AADSTS(530035|530034|53000|53001|53002|53003|50158)') {
-                    $code = $Matches[1]
-                    $meaning = switch ($code) {
-                        '53000'  { 'a policy requires a compliant or hybrid-joined device' }
-                        '53001'  { 'a policy requires a domain-joined device' }
-                        '53002'  { 'a policy requires an approved client application' }
-                        '530035' { 'a policy requires an Intune app protection policy' }
-                        '530034' { 'a policy requires remediation before access' }
-                        '50158'  { 'an external security challenge was not satisfied' }
-                        default  { 'a Conditional Access policy blocked token issuance' }
-                    }
-                    throw @"
-Sign-in succeeded but Conditional Access refused the token (AADSTS$code):
-$meaning.
-
-A PowerShell device-code sign-in is an ordinary browser sign-in from an
-unmanaged process, so device-compliance and app-protection grant controls
-cannot be satisfied by this flow at all. Changing the app registration will
-not help.
-
-Confirm what blocked it:
-  Microsoft Entra admin center > Monitoring > Sign-in logs, find this attempt,
-  open the Conditional Access tab, and read the Policy name showing "Failure".
-
-If the policy name is "Security Defaults":
-  Security defaults block device code flow outright, and they are all or
-  nothing - there is no way to exclude an application, user or group from
-  them. Use -AuthMode ClientSecret (see below). The only alternative is
-  turning security defaults off tenant-wide and rebuilding the protection
-  with Conditional Access, which needs Microsoft Entra ID P1.
-
-If it is a named Conditional Access policy:
-  Exclude this application from it - Conditional Access > the policy >
-  Target resources > Exclude. Narrow and reversible.
-
-Either way, app-only authentication sidesteps this entirely:
-  Re-run with -AuthMode ClientSecret. Client credentials are not a device
-  code sign-in and are not subject to security defaults or user-targeted
-  Conditional Access. It needs the extra setup in docs/app-registration.md
-  (steps 3b, 3c and 4).
-
-Service response: $description
-"@
-                }
-                throw "Device code sign-in failed: $($poll.Content.error) - $description"
+                throw (Get-WsAuthFailureMessage -ErrorCode $poll.Content.error -Description $description)
             }
         }
     }
     throw 'Device code sign-in timed out.'
+}
+
+function New-WsPkcePair {
+    <#
+    .SYNOPSIS
+        Generates an RFC 7636 PKCE verifier and its S256 challenge.
+    #>
+    $bytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+
+    # base64url: no padding, - and _ instead of + and /
+    $toBase64Url = { param($raw) [Convert]::ToBase64String($raw).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
+
+    $verifier = & $toBase64Url $bytes
+    $hash     = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::ASCII.GetBytes($verifier))
+
+    return [pscustomobject]@{ Verifier = $verifier; Challenge = (& $toBase64Url $hash) }
+}
+
+function Open-WsBrowser {
+    <#
+    .SYNOPSIS
+        Opens a URL in the platform's default browser. Returns $false if it could
+        not, so the caller can fall back to printing the URL.
+    #>
+    param([Parameter(Mandatory)][string]$Url)
+    try {
+        if ($IsMacOS)      { & open $Url }
+        elseif ($IsLinux)  { & xdg-open $Url 2>$null }
+        else               { Start-Process $Url | Out-Null }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Request-WsInteractiveBrowserToken {
+    <#
+    .SYNOPSIS
+        OAuth 2.0 authorization code flow with PKCE, over a loopback redirect.
+    .DESCRIPTION
+        Unlike the device code grant, this is an ordinary interactive browser
+        sign-in. Security defaults block device code flow outright but are
+        perfectly happy with this, including the MFA they require - so this is
+        the delegated flow that works on a tenant with security defaults on.
+
+        No client secret is involved: the app registration is a public client and
+        PKCE binds the authorization code to this process.
+    #>
+    param([Parameter(Mandatory)][string]$Scope)
+
+    $pkce  = New-WsPkcePair
+    $state = [guid]::NewGuid().ToString('N')
+
+    $query = ConvertTo-WsFormBody @{
+        client_id             = $script:Auth.ClientId
+        response_type         = 'code'
+        redirect_uri          = $script:Auth.RedirectUri
+        response_mode         = 'query'
+        scope                 = $Scope
+        state                 = $state
+        code_challenge        = $pkce.Challenge
+        code_challenge_method = 'S256'
+        prompt                = 'select_account'
+    }
+    $authorizeUrl = '{0}?{1}' -f $script:Auth.AuthorizeUri, $query
+
+    $listener = [System.Net.HttpListener]::new()
+    $listener.Prefixes.Add($script:Auth.RedirectUri)
+    try { $listener.Start() }
+    catch {
+        throw "Could not listen on $($script:Auth.RedirectUri): $($_.Exception.Message)`nAnother process may be using that port. Pass a different -RedirectPort and register the matching redirect URI on the app."
+    }
+
+    try {
+        Write-Host ''
+        Write-Host '  ------------------------------------------------------------------' -ForegroundColor Cyan
+        Write-Host '   Sign in to continue' -ForegroundColor Cyan
+        if (Open-WsBrowser -Url $authorizeUrl) {
+            Write-Host '   A browser window has been opened.' -ForegroundColor White
+        }
+        else {
+            Write-Host '   Open this URL in your browser:' -ForegroundColor White
+        }
+        Write-Host "   $authorizeUrl" -ForegroundColor DarkGray
+        Write-Host '   Sign in as a Global Administrator.' -ForegroundColor DarkGray
+        Write-Host '  ------------------------------------------------------------------' -ForegroundColor Cyan
+        Write-Host ''
+
+        # Wait for the browser redirect, but never hang the script forever.
+        $contextTask = $listener.GetContextAsync()
+        if (-not $contextTask.Wait([timespan]::FromMinutes(5))) {
+            throw 'Timed out after 5 minutes waiting for the browser sign-in to complete.'
+        }
+        $context = $contextTask.Result
+        $request = $context.Request
+
+        $code          = $request.QueryString['code']
+        $returnedState = $request.QueryString['state']
+        $authError     = $request.QueryString['error']
+        $errorDetail   = $request.QueryString['error_description']
+
+        $ok = [string]::IsNullOrEmpty($authError) -and -not [string]::IsNullOrEmpty($code)
+        $body = if ($ok) {
+            '<h2>Signed in</h2><p>You can close this tab and return to the terminal.</p>'
+        }
+        else {
+            "<h2>Sign-in failed</h2><p>$([System.Net.WebUtility]::HtmlEncode(($errorDetail ?? $authError)))</p>"
+        }
+
+        $html  = "<!doctype html><html><head><meta charset='utf-8'><title>Workshop provisioning</title></head><body style='font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem'>$body</body></html>"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($html)
+        $context.Response.ContentType     = 'text/html; charset=utf-8'
+        $context.Response.ContentLength64 = $bytes.Length
+        $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $context.Response.OutputStream.Close()
+
+        if (-not [string]::IsNullOrEmpty($authError)) {
+            throw (Get-WsAuthFailureMessage -ErrorCode $authError -Description $errorDetail)
+        }
+        if ([string]::IsNullOrEmpty($code)) { throw 'The browser redirect carried no authorization code.' }
+        # Guards against a redirect that did not originate from this request.
+        if ($returnedState -ne $state) { throw 'State mismatch on the authorization response; aborting.' }
+    }
+    finally {
+        $listener.Stop()
+        $listener.Close()
+    }
+
+    $tokenBody = ConvertTo-WsFormBody @{
+        client_id     = $script:Auth.ClientId
+        grant_type    = 'authorization_code'
+        code          = $code
+        redirect_uri  = $script:Auth.RedirectUri
+        code_verifier = $pkce.Verifier
+    }
+    $result = Invoke-WsRestMethod -Uri $script:Auth.TokenUri -Method POST -Body $tokenBody `
+        -ContentType 'application/x-www-form-urlencoded' -TolerateStatus @(400, 401) -Context 'auth'
+
+    if (-not $result.Success) {
+        $desc = if ($result.Content.PSObject.Properties.Name -contains 'error_description') { $result.Content.error_description } else { '' }
+        throw (Get-WsAuthFailureMessage -ErrorCode $result.Content.error -Description $desc)
+    }
+
+    if ($result.Content.PSObject.Properties.Name -contains 'refresh_token') {
+        $script:Auth.RefreshToken = $result.Content.refresh_token
+    }
+    Write-WsLog 'Sign-in complete.' -Level Success -Context 'auth'
+    return $result.Content
+}
+
+function Get-WsAuthFailureMessage {
+    <#
+    .SYNOPSIS
+        Turns an Entra ID sign-in failure into an explanation and a way forward.
+    .DESCRIPTION
+        Conditional Access and security defaults both authenticate the user
+        successfully and then refuse the token, which is confusing on its own.
+        This names the control responsible and states what actually resolves it.
+    #>
+    [CmdletBinding()]
+    param([string]$ErrorCode, [string]$Description)
+
+    # Longest alternatives first: 53003 would otherwise shadow 530034/530035.
+    if ($Description -match 'AADSTS(530035|530034|53000|53001|53002|53003|50158)') {
+        $code = $Matches[1]
+        $meaning = switch ($code) {
+            '53000'  { 'a policy requires a compliant or hybrid-joined device' }
+            '53001'  { 'a policy requires a domain-joined device' }
+            '53002'  { 'a policy requires an approved client application' }
+            '530035' { 'a policy requires an Intune app protection policy, or security defaults blocked the flow' }
+            '530034' { 'a policy requires remediation before access' }
+            '50158'  { 'an external security challenge was not satisfied' }
+            default  { 'a Conditional Access policy blocked token issuance' }
+        }
+        return @"
+Sign-in succeeded but the token was refused (AADSTS$code):
+$meaning.
+
+Find what blocked it:
+  Microsoft Entra admin center > Monitoring > Sign-in logs, open this attempt,
+  and read the Policy name on the Conditional Access tab.
+
+If the policy is "Security Defaults":
+  Security defaults block the device code grant outright, and they are all or
+  nothing - no application, user or group can be excluded. Use
+  -AuthMode InteractiveBrowser, which is an ordinary browser sign-in that
+  security defaults permit (and which satisfies their MFA requirement).
+
+If it is a named Conditional Access policy:
+  Exclude this application - Conditional Access > the policy > Target
+  resources > Exclude. Device- and app-based grant controls can never be
+  satisfied by a device code sign-in, so an exclusion is the only fix that
+  keeps this flow.
+
+Alternatively, -AuthMode ClientSecret avoids user sign-in entirely, at the cost
+of the extra setup in docs/app-registration.md (steps 3b, 3c and 4).
+
+Service response: $Description
+"@
+    }
+
+    if ($ErrorCode -eq 'access_denied') {
+        return "Sign-in was declined, or an administrator has not consented to the requested permissions.`nService response: $Description"
+    }
+    return "Sign-in failed: $ErrorCode - $Description"
 }
 
 function Get-WsToken {
@@ -261,7 +418,9 @@ function Get-WsToken {
     else {
         # Try the silent path first so only the first resource prompts.
         $silent = Request-WsRefreshedToken -Scope $scope
-        if ($null -ne $silent) { $silent } else { Request-WsDeviceCodeToken -Scope $scope }
+        if ($null -ne $silent) { $silent }
+        elseif ($script:Auth.Mode -eq 'InteractiveBrowser') { Request-WsInteractiveBrowserToken -Scope $scope }
+        else { Request-WsDeviceCodeToken -Scope $scope }
     }
 
     $expiresIn = if ($token.PSObject.Properties.Name -contains 'expires_in') { [int]$token.expires_in } else { 3600 }
@@ -336,4 +495,4 @@ function Get-WsSignedInAccount {
 }
 
 Export-ModuleMember -Function Initialize-WsAuth, Get-WsToken, Get-WsAuthHeader, Get-WsTokenClaim,
-    Get-WsResourceUri, Get-WsAuthMode, Get-WsSignedInAccount
+    Get-WsResourceUri, Get-WsAuthMode, Get-WsSignedInAccount, New-WsPkcePair, Get-WsAuthFailureMessage

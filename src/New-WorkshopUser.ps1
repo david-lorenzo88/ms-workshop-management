@@ -77,7 +77,7 @@ param(
     [ValidateSet('User', 'License', 'PowerPlatform', 'BusinessCentral')]
     [string[]]$Steps = @('User', 'License', 'PowerPlatform', 'BusinessCentral'),
 
-    [ValidateSet('ClientSecret', 'DeviceCode')][string]$AuthMode,
+    [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$AuthMode,
     [string]$TenantId,
     [string]$ClientId,
     [string]$OutputDirectory,

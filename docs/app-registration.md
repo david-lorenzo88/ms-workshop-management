@@ -111,7 +111,39 @@ Also confirm the tenant allows Developer environment creation:
 
 ---
 
-## 5. DeviceCode mode — the shortcut
+## 5. InteractiveBrowser mode — the recommended path
+
+This is a browser sign-in using the authorization code flow with PKCE. It needs
+**no client secret**, and it is permitted by security defaults (unlike device
+code flow), because it is an ordinary interactive sign-in that satisfies MFA.
+
+Configure the app registration as a public client:
+
+1. **Authentication** → **Add a platform** → **Mobile and desktop applications**.
+2. Add the redirect URI `http://localhost:8400/` — exactly, including the
+   trailing slash. Change the port with `-RedirectPort` if 8400 is in use, and
+   register the matching URI.
+3. **Allow public client flows** → **Yes**.
+4. **API permissions** → add these as **Delegated**:
+   - Microsoft Graph: `User.ReadWrite.All`, `Organization.Read.All`, `Domain.Read.All`
+   - Dynamics 365 Business Central: `AdminCenter.ReadWrite.All`, `Automation.ReadWrite.All`
+   - → **Grant admin consent** (these are admin-restricted scopes).
+
+**Steps 3b, 3c and 4 above do not apply to this mode.** Delegated calls are
+authorised by the signed-in administrator's own roles, so there is no service
+principal to register with Power Platform and no app to authorise inside
+Business Central.
+
+Sign in as a **Global Administrator**, or **Dynamics 365 Administrator + Power
+Platform Administrator**. You are prompted once; the refresh token is redeemed
+silently for the other APIs.
+
+> For the Business Central step the signing-in admin must also be a **licensed
+> BC user in the target environment with rights to manage users** — the
+> automation API runs as a Business Central user, not merely as a tenant admin.
+> `./src/Test-WorkshopSetup.ps1` confirms this before workshop day.
+
+## 6. DeviceCode mode — usually blocked
 
 > **First check whether device code flow is even allowed.** Since July 2026 new
 > Microsoft Entra tenants block it as part of security defaults, and security
@@ -150,7 +182,7 @@ redeemed silently for the other APIs.
 
 ---
 
-## 6. A separate app for MCP hosts
+## 7. A separate app for MCP hosts
 
 Attendees connecting Claude Code, ChatGPT or another non-Microsoft MCP host need
 their *own* app registration — a public client with a delegated Business Central
@@ -159,6 +191,19 @@ permission. Do **not** reuse the provisioning app above.
 See [mcp-client-setup.md](mcp-client-setup.md).
 
 ---
+
+## Registering a management app without the PowerShell module
+
+`New-PowerAppManagementApp` lives in `Microsoft.PowerApps.Administration.PowerShell`,
+which depends on .NET Framework and **does not run on macOS or Linux**. Step 4 is
+a single REST call, so the toolkit ships the equivalent:
+
+```powershell
+./src/Register-PowerPlatformApp.ps1 -ApplicationId <app-to-register> -AuthMode InteractiveBrowser
+./src/Register-PowerPlatformApp.ps1 -ApplicationId <any> -List   # what is already registered
+```
+
+Only app-only runs need this at all.
 
 ## Verifying the setup
 

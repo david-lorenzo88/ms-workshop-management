@@ -38,7 +38,7 @@ param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot '..' 'config' 'workshop.config.json'),
     [string]$TenantId,
     [string]$ClientId,
-    [ValidateSet('ClientSecret', 'DeviceCode')][string]$AuthMode,
+    [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$AuthMode,
     [int]$AttendeeCount = 10,
     [ValidateSet('Debug', 'Info', 'Warn', 'Error')][string]$LogLevel = 'Warn'
 )
