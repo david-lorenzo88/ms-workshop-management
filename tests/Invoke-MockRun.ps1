@@ -27,6 +27,7 @@ $global:MockState = @{
     BcUsers      = @{}
     BcPerms      = @{}
     Licenses     = @{}
+    BlankCompanyDisplayName = $false
 }
 
 # Pre-seed Business Central with the synced users so the wait loop resolves.
@@ -148,7 +149,9 @@ function global:Invoke-WebRequest {
 
         # ---- Business Central: automation API ----
         'automation/v2\.0/companies$' {
-            return reply 200 @{ value = @(@{ id = 'c0000001-0000-0000-0000-00000000000c'; name = 'CRONUS'; displayName = 'CRONUS USA, Inc.' }) }
+            # Real Business Central companies sometimes have an empty displayName.
+            $display = if ($global:MockState.BlankCompanyDisplayName) { '' } else { 'CRONUS USA, Inc.' }
+            return reply 200 @{ value = @(@{ id = 'c0000001-0000-0000-0000-00000000000c'; name = 'CRONUS'; displayName = $display }) }
         }
         'getNewUsersFromOffice365Async' { return reply 200 @{ status = 'Scheduled' } }
         'companies\([^)]+\)/users$' { return reply 200 @{ value = @($global:MockState.BcUsers.Values) } }
@@ -229,6 +232,26 @@ $preflightOut = & (Join-Path $root 'src' 'Test-WorkshopSetup.ps1') -ConfigPath $
     Tee-Object -Variable preflightConsole
 $preflight = @($preflightOut | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Name -contains 'Status' })
 $preflightText = ($preflightConsole | Out-String -Width 200)
+
+Write-Host "`n########## PASS 5: single-element config and blank company name ##########`n" -ForegroundColor Magenta
+# One configured SKU and one attendee: a single-element array assigned out of an
+# if-block unrolls to a scalar, and .Count on a String throws under StrictMode.
+# This crashed every attendee in a real run until it was fixed.
+$singleConfig = Join-Path $workDir 'single.json'
+$sc = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+$sc.licenses.skuPartNumbers = @('DYN365_BUSCENTRAL_PREMIUM')
+# Empty companyName means "use whichever company exists", which is what a real
+# config looks like when the company name is not known up front.
+$sc.businessCentral.companyName = ''
+$sc | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $singleConfig -Encoding utf8
+
+$singleCsv = Join-Path $env:MOCK_OUT 'single.csv'
+"UserPrincipalName,DisplayName`nanna.smith@contoso.onmicrosoft.com,Anna Smith" |
+    Set-Content -LiteralPath $singleCsv -Encoding utf8
+
+$global:MockState.BlankCompanyDisplayName = $true
+$pass5 = & $script -ConfigPath $singleConfig -Csv $singleCsv -OutputDirectory $env:MOCK_OUT -LogLevel Warn
+$global:MockState.BlankCompanyDisplayName = $false
 
 # --- assertions ------------------------------------------------------------------
 
@@ -316,7 +339,7 @@ $bogus = Grant-WsBcPermission -EnvironmentName 'SANDBOX-WORKSHOP' `
 Assert ($bogus.Unavailable -contains 'NOT A REAL SET') 'unknown permission set is reported as unavailable'
 
 Assert ($pass3.Count -eq 1 -and $pass3[0].Steps.User -eq 'Created') 'minimal 2-column CSV provisions without error'
-Assert ($pass3[0].Errors -notmatch 'cannot be found on this object') 'minimal CSV does not trip StrictMode on absent columns'
+Assert ((@($pass3[0].Errors) -join ' | ') -notmatch 'cannot be found on this object') 'minimal CSV does not trip StrictMode on absent columns'
 $minimalEnv = @($global:MockState.Requests | Where-Object {
         $_.Method -eq 'POST' -and $_.Uri -match 'BusinessAppPlatform/environments\?' -and
         $_.Body.properties.displayName -eq 'DEV - Minimal User'
@@ -342,6 +365,16 @@ Assert ((& $pf 'Permission sets').Status -eq 'PASS') 'pre-flight confirms D365 F
 Assert ((& $pf 'SKU DYN365_BUSCENTRAL_PREMIUM').Status -in 'PASS', 'WARN') 'pre-flight checks seat availability per SKU'
 Assert (@($preflight | Where-Object { $_.Status -eq 'FAIL' }).Count -eq 0) 'pre-flight reports no blocking problems against a healthy tenant'
 Assert ($preflightText -match 'READY TO PROVISION') 'pre-flight verdict prints even at the default log level'
+
+Assert (@($pass5).Count -eq 1) 'single-attendee CSV yields one result'
+Assert ($pass5[0].Errors.Count -eq 0) "single SKU + single attendee runs clean (errors: $($pass5[0].Errors -join '; '))"
+Assert ((@($pass5[0].Errors) -join ' | ') -notmatch "property 'Count' cannot be found") 'no StrictMode Count failure on a one-element SKU list'
+Assert ($pass5[0].Steps.License -match 'DYN365_BUSCENTRAL_PREMIUM' -or $pass5[0].Steps.License -eq 'AlreadyLicensed') 'the single configured SKU was actually processed'
+
+# A blank displayName must fall back to the technical name, or the MCP Company
+# header would be empty and the connection would fail.
+$annaMcp2 = Get-Content (Join-Path $env:MOCK_OUT 'mcp-anna.smith.json') -Raw | ConvertFrom-Json
+Assert ($annaMcp2.mcpServers.businesscentral.headers.Company -eq 'CRONUS') "blank company displayName falls back to name (got '$($annaMcp2.mcpServers.businesscentral.headers.Company)')"
 
 Write-Host ''
 if ($failures.Count -gt 0) {

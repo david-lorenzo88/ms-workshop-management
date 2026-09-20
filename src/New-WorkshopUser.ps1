@@ -209,7 +209,9 @@ if (-not (Test-Path -LiteralPath $outputDir)) { New-Item -ItemType Directory -Pa
 
 # --- attendee roster -----------------------------------------------------------
 
-$attendees = if ($PSCmdlet.ParameterSetName -eq 'Bulk') {
+# @() for the same reason: a one-row CSV, or single-attendee mode, would
+# otherwise leave $attendees a bare object and $attendees.Count would throw.
+$attendees = @(if ($PSCmdlet.ParameterSetName -eq 'Bulk') {
     if (-not (Test-Path -LiteralPath $Csv)) { throw "Attendee CSV not found: $Csv" }
     $rows = Import-Csv -LiteralPath $Csv
     if (-not $rows) { throw "Attendee CSV '$Csv' contains no rows." }
@@ -227,7 +229,7 @@ else {
             JobTitle          = $JobTitle
             Department        = $Department
         })
-}
+})
 
 Write-WsLog "$($attendees.Count) attendee(s) to process" -Level Info
 
@@ -248,14 +250,23 @@ if ($bcEnabled) {
     Write-WsLog "Business Central environment '$bcEnvironment' (type $($environment.type), status $($environment.status))" -Level Info -Context 'bc'
 
     $companyName = Get-Setting $config 'businessCentral.companyName'
-    $companies   = Get-WsBcCompany -EnvironmentName $bcEnvironment -CompanyName $companyName
+    $companies   = @(Get-WsBcCompany -EnvironmentName $bcEnvironment -CompanyName $companyName)
     $bcCompany   = $companies | Select-Object -First 1
 
     if ($null -eq $bcCompany) {
         $hint = if ($companyName) { "Company '$companyName' was not found in '$bcEnvironment'." } else { "No companies found in '$bcEnvironment'." }
         throw "$hint Check businessCentral.companyName in the config."
     }
-    Write-WsLog "Using company '$($bcCompany.displayName)' ($($bcCompany.id))" -Level Info -Context 'bc'
+    # Business Central companies may have an empty displayName; the technical
+    # name is what the MCP Company header needs in that case.
+    $bcCompanyLabel = if (-not [string]::IsNullOrWhiteSpace($bcCompany.displayName)) { $bcCompany.displayName }
+    elseif (-not [string]::IsNullOrWhiteSpace($bcCompany.name)) { $bcCompany.name }
+    else { $null }
+
+    if ($null -eq $bcCompanyLabel) {
+        throw "Company $($bcCompany.id) in '$bcEnvironment' has neither a display name nor a name; the MCP Company header cannot be built."
+    }
+    Write-WsLog "Using company '$bcCompanyLabel' ($($bcCompany.id))" -Level Info -Context 'bc'
 
     # Kick the Microsoft 365 -> Business Central user sync once for the whole run
     # rather than once per attendee: it is a tenant-wide operation.
@@ -339,12 +350,15 @@ foreach ($attendee in $attendees) {
         # ---- Step 2: licences -------------------------------------------------
         if ('License' -in $Steps) {
             $rowLicenses = Get-RowValue -Row $attendee -Name 'Licenses'
-            $skus = if ($null -ne $rowLicenses) {
-                ($rowLicenses -split ';').Trim() | Where-Object { $_ }
-            }
-            else {
-                @(Get-Setting $config 'licenses.skuPartNumbers' @())
-            }
+            # @() wraps the WHOLE if-statement: assigning a single-element array
+            # out of an if-block unrolls it to a scalar, and .Count on a String
+            # throws under StrictMode. One configured SKU used to crash here.
+            $skus = @(if ($null -ne $rowLicenses) {
+                    ($rowLicenses -split ';').Trim() | Where-Object { $_ }
+                }
+                else {
+                    Get-Setting $config 'licenses.skuPartNumbers' @()
+                })
 
             if (-not $skus -or $skus.Count -eq 0) {
                 Write-WsLog 'No licence SKUs configured - skipping licence assignment.' -Level Warn -Context 'entra'
@@ -434,7 +448,7 @@ foreach ($attendee in $attendees) {
                 $mcp = New-WsBcMcpClientConfig `
                     -TenantId          $resolvedTenantId `
                     -EnvironmentName   $bcEnvironment `
-                    -CompanyName       $bcCompany.displayName `
+                    -CompanyName       $bcCompanyLabel `
                     -ConfigurationName (Get-Setting $config 'businessCentral.mcp.configurationName') `
                     -McpClientId       (Get-Setting $config 'businessCentral.mcp.clientId') `
                     -CallbackPort      ([int](Get-Setting $config 'businessCentral.mcp.callbackPort' 33418)) `
