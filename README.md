@@ -58,6 +58,18 @@ few minutes to reach the environment, so this is the common follow-up:
 ./src/New-WorkshopUser.ps1 -Csv data/attendees.csv -Steps BusinessCentral
 ```
 
+### Generating a numbered roster
+
+For a workshop with numbered accounts, generate the CSV rather than typing it:
+
+```powershell
+./src/New-AttendeeRoster.ps1 -Domain contoso.onmicrosoft.com -Count 10 -OutFile data/workshop-users.csv
+# -> user1@... through user10@...
+```
+
+`-Prefix` changes the stem, and `-StartAt` extends an existing roster without
+renumbering it (`-Count 5 -StartAt 11` adds user11 ... user15).
+
 ### Attendee CSV
 
 `UserPrincipalName` and `DisplayName` are required; the rest are optional.
