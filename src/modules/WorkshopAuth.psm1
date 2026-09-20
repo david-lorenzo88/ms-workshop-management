@@ -201,16 +201,26 @@ unmanaged process, so device-compliance and app-protection grant controls
 cannot be satisfied by this flow at all. Changing the app registration will
 not help.
 
-Confirm which policy is responsible:
+Confirm what blocked it:
   Microsoft Entra admin center > Monitoring > Sign-in logs, find this attempt,
-  open the Conditional Access tab, and look for the policy showing "Failure".
+  open the Conditional Access tab, and read the Policy name showing "Failure".
 
-Then either:
-  1. Exclude this application from that policy (Conditional Access > the policy >
-     Target resources > Exclude), which is the narrow, reversible option; or
-  2. Switch to app-only authentication with -AuthMode ClientSecret. Client
-     credentials are not subject to user-targeted Conditional Access, but it
-     needs the extra setup in docs/app-registration.md (steps 3b, 3c and 4).
+If the policy name is "Security Defaults":
+  Security defaults block device code flow outright, and they are all or
+  nothing - there is no way to exclude an application, user or group from
+  them. Use -AuthMode ClientSecret (see below). The only alternative is
+  turning security defaults off tenant-wide and rebuilding the protection
+  with Conditional Access, which needs Microsoft Entra ID P1.
+
+If it is a named Conditional Access policy:
+  Exclude this application from it - Conditional Access > the policy >
+  Target resources > Exclude. Narrow and reversible.
+
+Either way, app-only authentication sidesteps this entirely:
+  Re-run with -AuthMode ClientSecret. Client credentials are not a device
+  code sign-in and are not subject to security defaults or user-targeted
+  Conditional Access. It needs the extra setup in docs/app-registration.md
+  (steps 3b, 3c and 4).
 
 Service response: $description
 "@

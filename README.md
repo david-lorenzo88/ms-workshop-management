@@ -110,13 +110,23 @@ ben.jones@contoso.com,Ben Jones,Ben,Jones,Developer,Workshop,DYN365_BUSCENTRAL_P
 | `ClientSecret` | default | Unattended runs. App-only, no prompts. |
 | `DeviceCode` | `-AuthMode DeviceCode` | Interactive. Fewer setup steps, and the only mode that can force a Business Central user sync. |
 
-**DeviceCode needs noticeably less setup**, because the APIs honour *your* admin
-roles rather than a service principal's grants:
+**Check security defaults before choosing DeviceCode** (see the warning below) —
+on a new tenant it will simply be blocked. Where it is available, it needs
+noticeably less setup, because the APIs honour *your* admin roles rather than a
+service principal's grants:
 
 - No `New-PowerAppManagementApp` registration — that exists only for app-only
   access to the Power Platform BAP API.
 - No "Authorized Microsoft Entra apps" entry in the Business Central admin center.
 - No client secret to store, rotate, or keep out of source control.
+
+> **Security defaults block DeviceCode.** Since July 2026 new Microsoft Entra
+> tenants block device code flow as part of security defaults, and security
+> defaults cannot be scoped — there is no exclusion for an application, user or
+> group. If your tenant has them on, `-AuthMode ClientSecret` is your route, or
+> you turn security defaults off tenant-wide and rebuild the protection with
+> Conditional Access (Entra ID P1). Check under
+> **Entra ID > Overview > Properties > Manage security defaults**.
 
 **Conditional Access can veto DeviceCode outright.** A device-code sign-in is an
 ordinary browser sign-in from an unmanaged process, so grant controls like

@@ -113,7 +113,16 @@ Also confirm the tenant allows Developer environment creation:
 
 ## 5. DeviceCode mode — the shortcut
 
-> **If you use `-AuthMode DeviceCode`, steps 3b, 3c and 4 above do not apply.**
+> **First check whether device code flow is even allowed.** Since July 2026 new
+> Microsoft Entra tenants block it as part of security defaults, and security
+> defaults admit no exclusions — not for an application, not for a user. A
+> blocked attempt authenticates successfully and is then refused the token
+> (`AADSTS530035`), with the sign-in log naming **Security Defaults** as the
+> failing policy. Look under **Entra ID > Overview > Properties > Manage
+> security defaults**. If they are on, use `-AuthMode ClientSecret` and complete
+> steps 3b, 3c and 4 above.
+>
+> **If device code flow is available, steps 3b, 3c and 4 above do not apply.**
 > Delegated calls are authorised by the signed-in administrator's own roles, so
 > there is no service principal to register with Power Platform and no app to
 > authorise inside Business Central. You also never handle a client secret.
