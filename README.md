@@ -216,6 +216,27 @@ The environment is created with `environmentSku: "Developer"` and a `usedBy` blo
 naming the attendee, which is what makes the attendee — rather than the admin
 running the script — the owner and System Administrator.
 
+### A real limitation: creating environments needs a BAP token
+
+Environment **creation** exists only on the legacy BAP API
+(`api.bap.microsoft.com`). Microsoft does not expose that audience as an addable
+delegated permission for custom app registrations, and the modern Power Platform
+API (`api.powerplatform.com`) grants only `EnvironmentManagement.Environments.Read`
+— there is no `.ReadWrite` for environments. A custom app asking for the BAP
+audience gets `AADSTS650057: Invalid resource`.
+
+Three ways round it, cheapest first:
+
+1. **`-UseAzureCliFor PowerPlatform`** — mint just that token with the Azure CLI,
+   which is a pre-authorised first-party client. `brew install azure-cli && az login`,
+   then the provisioning run works unchanged. Graph and Business Central still use
+   your own app registration.
+2. **Create the environments by hand** in the Power Platform admin center
+   (New → Developer → *Create on behalf* → pick the owner) and run provisioning
+   with `-Steps User,License,BusinessCentral`.
+3. **Let attendees create their own** free Developer environment at
+   make.powerapps.com. Perfectly reasonable for a workshop, and it teaches the flow.
+
 Constraints worth knowing:
 
 - An admin can create **up to 3** Developer environments per owner.

@@ -13,7 +13,7 @@
   },
 
   "licenses": {
-    "$comment": "SKU part numbers as shown by Get-WsSubscribedSku. Business Central needs Essentials or Premium; the Power Apps Developer Plan is free and self-service.",
+    "$comment": "Run ./src/Test-WorkshopSetup.ps1 to print the SKU part numbers this tenant actually owns, with free seats. Paid tenants have DYN365_BUSCENTRAL_ESSENTIAL or _PREMIUM; a trial tenant's Business Central licence is PROJECT_MADEIRA_PREVIEW_IW_SKU. The Power Apps Developer Plan is free and self-service, so POWERAPPS_DEV only appears once someone has signed up for it.",
     "skuPartNumbers": [
       "DYN365_BUSCENTRAL_PREMIUM",
       "POWERAPPS_DEV"

@@ -46,7 +46,12 @@ function Initialize-WsAuth {
         [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$Mode = 'ClientSecret',
         [string]$AuthorityHost = 'https://login.microsoftonline.com',
         [hashtable]$ScopeOverride,
-        [int]$RedirectPort = 8400
+        [int]$RedirectPort = 8400,
+        # Resources to obtain tokens for via the Azure CLI instead of this app
+        # registration. Needed for PowerPlatform: environment creation lives on
+        # the legacy BAP API, whose audience a custom app registration cannot
+        # request, while the Azure CLI is a pre-authorised first-party client.
+        [ValidateSet('Graph', 'PowerPlatform', 'BusinessCentral')][string[]]$AzureCliResources = @()
     )
 
     if ($Mode -eq 'ClientSecret' -and [string]::IsNullOrWhiteSpace($ClientSecret)) {
@@ -65,6 +70,7 @@ function Initialize-WsAuth {
         Cache        = @{}
         RefreshToken = $null
         Account      = $null
+        AzureCliResources = @($AzureCliResources)
         # Optional per-resource scope overrides, for tenants where the
         # '{resource}/.default' form is not what the app registration expects.
         ScopeOverride = $ScopeOverride
@@ -389,6 +395,66 @@ Service response: $Description
     return "Sign-in failed: $ErrorCode - $Description"
 }
 
+function Get-WsAzureCliToken {
+    <#
+    .SYNOPSIS
+        Obtains an access token for a resource through the Azure CLI.
+    .DESCRIPTION
+        The Azure CLI is a pre-authorised first-party public client, so it can
+        request audiences that a custom app registration cannot - notably
+        https://api.bap.microsoft.com, which is where Power Platform environment
+        creation lives and which Microsoft does not expose as an addable
+        delegated permission.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ResourceUri,
+        [string]$TenantId
+    )
+
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+        throw @"
+The Azure CLI (az) was not found on PATH, and it is needed to obtain a token for
+$ResourceUri.
+
+  macOS   : brew install azure-cli
+  Windows : winget install Microsoft.AzureCLI
+  Linux   : https://learn.microsoft.com/cli/azure/install-azure-cli
+
+Then run 'az login' and try again.
+"@
+    }
+
+    $arguments = @('account', 'get-access-token', '--resource', $ResourceUri, '--output', 'json')
+    if (-not [string]::IsNullOrWhiteSpace($TenantId)) { $arguments += @('--tenant', $TenantId) }
+
+    Write-WsLog "Requesting $ResourceUri token via the Azure CLI..." -Level Info -Context 'auth'
+    $output = & az @arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw @"
+'az account get-access-token' failed for $ResourceUri.
+
+If you are not signed in:      az login --tenant $TenantId
+If the tenant is wrong:        az login --tenant $TenantId --allow-no-subscriptions
+
+Azure CLI said: $($output -join ' ')
+"@
+    }
+
+    try { $parsed = ($output -join '') | ConvertFrom-Json }
+    catch { throw "Could not parse the Azure CLI token response for $ResourceUri." }
+
+    # expiresOn is a local-time string; expires_on is epoch seconds. Prefer the
+    # unambiguous one, and fall back to a conservative default.
+    $lifetime = 3600
+    if ($parsed.PSObject.Properties.Name -contains 'expires_on') {
+        $remaining = [int]([DateTimeOffset]::FromUnixTimeSeconds([long]$parsed.expires_on) - [DateTimeOffset]::UtcNow).TotalSeconds
+        if ($remaining -gt 0) { $lifetime = $remaining }
+    }
+
+    return [pscustomobject]@{ access_token = $parsed.accessToken; expires_in = $lifetime }
+}
+
 function Get-WsToken {
     <#
     .SYNOPSIS
@@ -412,7 +478,10 @@ function Get-WsToken {
         $scope = $script:Auth.ScopeOverride[$Resource]
     }
 
-    $token = if ($script:Auth.Mode -eq 'ClientSecret') {
+    $token = if ($script:Auth.AzureCliResources -contains $Resource) {
+        Get-WsAzureCliToken -ResourceUri (Get-WsResourceUri -Resource $Resource) -TenantId $script:Auth.TenantId
+    }
+    elseif ($script:Auth.Mode -eq 'ClientSecret') {
         Request-WsClientCredentialsToken -Scope $scope
     }
     else {
@@ -495,4 +564,5 @@ function Get-WsSignedInAccount {
 }
 
 Export-ModuleMember -Function Initialize-WsAuth, Get-WsToken, Get-WsAuthHeader, Get-WsTokenClaim,
-    Get-WsResourceUri, Get-WsAuthMode, Get-WsSignedInAccount, New-WsPkcePair, Get-WsAuthFailureMessage
+    Get-WsResourceUri, Get-WsAuthMode, Get-WsSignedInAccount, New-WsPkcePair, Get-WsAuthFailureMessage,
+    Get-WsAzureCliToken

@@ -54,6 +54,29 @@ function Get-WsBcEnvironment {
     return $result.Content
 }
 
+function Get-WsBcEnvironmentList {
+    <#
+    .SYNOPSIS
+        Lists every Business Central environment in the tenant.
+    .DESCRIPTION
+        Used to tell an operator what the environment is actually called when the
+        configured name does not resolve - far more useful than "not found".
+    #>
+    [CmdletBinding()]
+    param([string]$ApplicationFamily = 'BusinessCentral')
+
+    $uri = '{0}/admin/{1}/applications/{2}/environments' -f `
+        $script:BcApiBase, $script:BcAdminVersion, $ApplicationFamily
+
+    $result = Invoke-WsRestMethod -Uri $uri -Headers (Get-WsAuthHeader -Resource BusinessCentral) `
+        -TolerateStatus @(403, 404) -Context 'bc'
+
+    if (-not $result.Success) { return @() }
+    if ($null -eq $result.Content) { return @() }
+    if ($result.Content.PSObject.Properties.Name -contains 'value') { return @($result.Content.value) }
+    return @($result.Content)
+}
+
 function Get-WsBcCompany {
     <#
     .SYNOPSIS
@@ -341,5 +364,5 @@ function New-WsBcMcpClientConfig {
     }
 }
 
-Export-ModuleMember -Function Get-WsBcEnvironment, Get-WsBcCompany, Get-WsBcUser, Sync-WsBcUsersFromEntra,
+Export-ModuleMember -Function Get-WsBcEnvironment, Get-WsBcEnvironmentList, Get-WsBcCompany, Get-WsBcUser, Sync-WsBcUsersFromEntra,
     Wait-WsBcUser, Get-WsBcPermissionSet, Grant-WsBcPermission, New-WsBcMcpClientConfig, Get-WsBcAutomationBase

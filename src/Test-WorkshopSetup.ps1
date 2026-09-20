@@ -39,6 +39,9 @@ param(
     [string]$TenantId,
     [string]$ClientId,
     [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$AuthMode,
+    # Obtain these resources' tokens via the Azure CLI instead of the app
+    # registration. Power Platform environment creation needs this.
+    [ValidateSet('Graph', 'PowerPlatform', 'BusinessCentral')][string[]]$UseAzureCliFor = @(),
     [int]$AttendeeCount = 10,
     [ValidateSet('Debug', 'Info', 'Warn', 'Error')][string]$LogLevel = 'Warn'
 )
@@ -129,7 +132,8 @@ if ($effectiveMode -eq 'ClientSecret') {
     if (-not $secret) { throw 'authMode is ClientSecret but no secret resolved. Set WORKSHOP_CLIENT_SECRET, or use -AuthMode DeviceCode.' }
 }
 
-Initialize-WsAuth -TenantId $effectiveTenant -ClientId $effectiveClient -ClientSecret $secret -Mode $effectiveMode | Out-Null
+Initialize-WsAuth -TenantId $effectiveTenant -ClientId $effectiveClient -ClientSecret $secret `
+    -Mode $effectiveMode -AzureCliResources $UseAzureCliFor | Out-Null
 Write-Host "Tenant $effectiveTenant | client $effectiveClient | auth $effectiveMode" -ForegroundColor DarkGray
 Write-Host ''
 
@@ -198,7 +202,21 @@ if ($graphOk) {
 Write-Host ''
 Write-Host 'Power Platform (Developer environments)' -ForegroundColor Cyan
 
-$bapOk = Invoke-Check -Area 'PowerPlatform' -Name 'Token' -Remedy 'Add delegated Power Platform API access, or sign in as a Power Platform Administrator.' -Probe {
+$bapOk = Invoke-Check -Area 'PowerPlatform' -Name 'Token' -Remedy @'
+AADSTS650057 means this app registration cannot request the BAP audience.
+Environment CREATION exists only on the legacy BAP API, which Microsoft does not
+expose as an addable delegated permission for custom app registrations - the
+modern Power Platform API grants only EnvironmentManagement.Environments.Read.
+
+Options, cheapest first:
+  1. -UseAzureCli - mint the Power Platform token with the Azure CLI, a
+     pre-authorised first-party client.  brew install azure-cli && az login
+  2. Create the Developer environments by hand in the Power Platform admin
+     center (New > Developer, then "Create on behalf" and pick the owner) and
+     provision with -Steps User,License,BusinessCentral
+  3. Have each attendee create their own free Developer environment at
+     make.powerapps.com - fine for a workshop, and it teaches them the flow
+'@ -Probe {
     $null = Get-WsToken -Resource PowerPlatform
     'token acquired'
 }
@@ -244,7 +262,15 @@ Under app-only auth, authorise the app in the BC admin center under
 "Authorized Microsoft Entra apps".
 '@ -Probe {
             $script:environment = Get-WsBcEnvironment -EnvironmentName $bcEnvName
-            if ($null -eq $script:environment) { throw "Environment '$bcEnvName' not found." }
+            if ($null -eq $script:environment) {
+                # Say what does exist rather than only what does not.
+                $available = Get-WsBcEnvironmentList
+                if ($available.Count -gt 0) {
+                    $names = ($available | ForEach-Object { "$($_.name) [$($_.type)]" }) -join ', '
+                    throw "Environment '$bcEnvName' not found. This tenant has: $names"
+                }
+                throw "Environment '$bcEnvName' not found, and this tenant has no Business Central environments at all. Create one at https://businesscentral.dynamics.com/admin"
+            }
             "$($script:environment.name): type $($script:environment.type), status $($script:environment.status)"
         } | Out-Null
 

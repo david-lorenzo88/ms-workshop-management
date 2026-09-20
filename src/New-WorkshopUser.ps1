@@ -78,6 +78,9 @@ param(
     [string[]]$Steps = @('User', 'License', 'PowerPlatform', 'BusinessCentral'),
 
     [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$AuthMode,
+    # Obtain these resources' tokens via the Azure CLI instead of the app
+    # registration. Power Platform environment creation needs this.
+    [ValidateSet('Graph', 'PowerPlatform', 'BusinessCentral')][string[]]$UseAzureCliFor = @(),
     [string]$TenantId,
     [string]$ClientId,
     [string]$OutputDirectory,
@@ -197,7 +200,8 @@ if ($resolvedAuthMode -eq 'ClientSecret') {
     }
 }
 
-Initialize-WsAuth -TenantId $resolvedTenantId -ClientId $resolvedClientId -ClientSecret $clientSecret -Mode $resolvedAuthMode | Out-Null
+Initialize-WsAuth -TenantId $resolvedTenantId -ClientId $resolvedClientId -ClientSecret $clientSecret `
+    -Mode $resolvedAuthMode -AzureCliResources $UseAzureCliFor | Out-Null
 Write-WsLog "Tenant $resolvedTenantId | auth $resolvedAuthMode | steps: $($Steps -join ', ')" -Level Info
 
 $outputDir = if ($OutputDirectory) { $OutputDirectory } else { Get-Setting $config 'output.directory' (Join-Path $PSScriptRoot '..' 'output') }
