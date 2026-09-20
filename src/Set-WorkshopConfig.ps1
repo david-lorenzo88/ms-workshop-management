@@ -47,6 +47,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'modules' 'WorkshopCommon.psm1') -Force -DisableNameChecking
 
+if ($PSBoundParameters.ContainsKey('Licenses')) { $Licenses = Resolve-WsListArgument -Value $Licenses -Name 'Licenses' }
+if ($PSBoundParameters.ContainsKey('PermissionSets')) { $PermissionSets = Resolve-WsListArgument -Value $PermissionSets -Name 'PermissionSets' }
 if ($DisablePowerPlatform -and $EnablePowerPlatform) { throw 'Pass only one of -DisablePowerPlatform / -EnablePowerPlatform.' }
 if ($DisableBusinessCentral -and $EnableBusinessCentral) { throw 'Pass only one of -DisableBusinessCentral / -EnableBusinessCentral.' }
 

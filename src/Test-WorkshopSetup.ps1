@@ -41,7 +41,7 @@ param(
     [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$AuthMode,
     # Obtain these resources' tokens via the Azure CLI instead of the app
     # registration. Power Platform environment creation needs this.
-    [ValidateSet('Graph', 'PowerPlatform', 'BusinessCentral')][string[]]$UseAzureCliFor = @(),
+    [string[]]$UseAzureCliFor = @(),
     [int]$AttendeeCount = 10,
     [ValidateSet('Debug', 'Info', 'Warn', 'Error')][string]$LogLevel = 'Warn'
 )
@@ -53,6 +53,9 @@ foreach ($module in 'WorkshopCommon', 'WorkshopAuth', 'WorkshopEntra', 'Workshop
     Import-Module (Join-Path $PSScriptRoot 'modules' "$module.psm1") -Force -DisableNameChecking
 }
 Set-WsLogLevel -Level $LogLevel
+
+$UseAzureCliFor = Resolve-WsListArgument -Value $UseAzureCliFor -Name 'UseAzureCliFor' `
+    -Allowed @('Graph', 'PowerPlatform', 'BusinessCentral')
 
 $checks = [System.Collections.Generic.List[object]]::new()
 

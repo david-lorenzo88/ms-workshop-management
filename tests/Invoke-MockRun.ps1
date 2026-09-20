@@ -404,6 +404,29 @@ Assert ($pass5[0].Steps.License -match 'DYN365_BUSCENTRAL_PREMIUM' -or $pass5[0]
 $annaMcp2 = Get-Content (Join-Path $env:MOCK_OUT 'mcp-anna.smith.json') -Raw | ConvertFrom-Json
 Assert ($annaMcp2.mcpServers.businesscentral.headers.Company -eq 'CRONUS') "blank company displayName falls back to name (got '$($annaMcp2.mcpServers.businesscentral.headers.Company)')"
 
+# A POSIX shell passes `-Steps a,b` as ONE argv token, so array parameters must
+# accept a comma-joined string as well as a real array. ValidateSet cannot do
+# this: it binds before any splitting could happen.
+$listCases = @(
+    @{ In = @('License,BusinessCentral'); Expect = 2; Label = 'comma-joined string splits into two' }
+    @{ In = @('License', 'BusinessCentral'); Expect = 2; Label = 'real array passes through' }
+    @{ In = @('license, businesscentral'); Expect = 2; Label = 'case and spacing tolerated' }
+    @{ In = @(); Expect = 0; Label = 'empty stays an empty array, not null' }
+    @{ In = @('License'); Expect = 1; Label = 'single value stays a one-element array' }
+)
+foreach ($case in $listCases) {
+    $out = Resolve-WsListArgument -Value $case.In -Name 'Steps' `
+        -Allowed @('User', 'License', 'PowerPlatform', 'BusinessCentral')
+    Assert ((@($out).Count -eq $case.Expect) -and ($null -ne $out)) "list argument: $($case.Label)"
+}
+$listError = $null
+try {
+    Resolve-WsListArgument -Value @('License,Nope') -Name 'Steps' `
+        -Allowed @('User', 'License', 'PowerPlatform', 'BusinessCentral') | Out-Null
+}
+catch { $listError = $_.Exception.Message }
+Assert ($listError -match "'Nope' is not a valid value for -Steps" -and $listError -match 'Valid values:') 'invalid list value names the offender and the allowed set'
+
 Write-Host ''
 if ($failures.Count -gt 0) {
     Write-Host "$($failures.Count) ASSERTION(S) FAILED" -ForegroundColor Red

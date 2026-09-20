@@ -283,6 +283,49 @@ function ConvertTo-WsBcHeaderValue {
     return "=?base64?${encoded}?="
 }
 
+function Resolve-WsListArgument {
+    <#
+    .SYNOPSIS
+        Normalises a list parameter that may have arrived as one comma-joined string.
+    .DESCRIPTION
+        Invoking a script from a POSIX shell (pwsh ./script.ps1 -Steps a,b) passes
+        "a,b" as a single argv token, because only PowerShell's own parser splits
+        an unquoted comma list into an array. ValidateSet then rejects it with a
+        message that does not hint at the cause. Splitting here, and validating
+        afterwards, makes both invocation styles behave the same.
+    .OUTPUTS
+        The normalised string array. Throws with the allowed values if any entry
+        is not permitted.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyCollection()][string[]]$Value,
+        [string[]]$Allowed,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $items = @($Value | Where-Object { $null -ne $_ } |
+        ForEach-Object { $_ -split ',' } |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+    if ($Allowed -and $items.Count -gt 0) {
+        # Match case-insensitively but return the canonical spelling.
+        $canonical = [System.Collections.Generic.List[string]]::new()
+        foreach ($item in $items) {
+            $match = $Allowed | Where-Object { $_ -ieq $item } | Select-Object -First 1
+            if (-not $match) {
+                throw "'$item' is not a valid value for -$Name. Valid values: $($Allowed -join ', ')."
+            }
+            $canonical.Add($match)
+        }
+        return , @($canonical | Select-Object -Unique)
+    }
+    # `return $items` would unroll: an empty array becomes $null and a
+    # single-element array becomes a scalar. The comma operator prevents both.
+    return , $items
+}
+
 function Get-WsConfig {
     <#
     .SYNOPSIS
@@ -333,5 +376,6 @@ function Resolve-WsSecret {
 }
 
 Export-ModuleMember -Function Set-WsLogLevel, Write-WsLog, Invoke-WsRestMethod, New-WsPassword,
+    Resolve-WsListArgument,
     ConvertTo-WsMailNickname, ConvertTo-WsBcHeaderValue, Get-WsConfig, Resolve-WsSecret,
     ConvertTo-WsRedactedString

@@ -74,13 +74,14 @@ param(
 
     [Parameter(Mandatory, ParameterSetName = 'Bulk')][string]$Csv,
 
-    [ValidateSet('User', 'License', 'PowerPlatform', 'BusinessCentral')]
+    # No ValidateSet: it binds before a comma-joined string can be split.
+    # Validated by Resolve-WsListArgument below, which accepts both forms.
     [string[]]$Steps = @('User', 'License', 'PowerPlatform', 'BusinessCentral'),
 
     [ValidateSet('ClientSecret', 'DeviceCode', 'InteractiveBrowser')][string]$AuthMode,
     # Obtain these resources' tokens via the Azure CLI instead of the app
     # registration. Power Platform environment creation needs this.
-    [ValidateSet('Graph', 'PowerPlatform', 'BusinessCentral')][string[]]$UseAzureCliFor = @(),
+    [string[]]$UseAzureCliFor = @(),
     [string]$TenantId,
     [string]$ClientId,
     [string]$OutputDirectory,
@@ -95,6 +96,14 @@ foreach ($module in 'WorkshopCommon', 'WorkshopAuth', 'WorkshopEntra', 'Workshop
     Import-Module (Join-Path $PSScriptRoot 'modules' "$module.psm1") -Force -DisableNameChecking
 }
 Set-WsLogLevel -Level $LogLevel
+
+# No @() wrapper: Resolve-WsListArgument already returns the array intact via
+# the comma operator, and wrapping again would nest it one level deeper.
+$Steps = Resolve-WsListArgument -Value $Steps -Name 'Steps' `
+    -Allowed @('User', 'License', 'PowerPlatform', 'BusinessCentral')
+$UseAzureCliFor = Resolve-WsListArgument -Value $UseAzureCliFor -Name 'UseAzureCliFor' `
+    -Allowed @('Graph', 'PowerPlatform', 'BusinessCentral')
+if ($Steps.Count -eq 0) { throw 'No steps selected. Omit -Steps to run all of them.' }
 
 # Preference variables do not cross module boundaries: a module function runs in
 # its own session state, so -WhatIf on this script does NOT reach the ShouldProcess

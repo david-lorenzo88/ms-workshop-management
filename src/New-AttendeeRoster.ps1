@@ -51,7 +51,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'modules' 'WorkshopCommon.psm1') -Force -DisableNameChecking
 
+$Licenses = Resolve-WsListArgument -Value $Licenses -Name 'Licenses'
 $licenseCell = if ($Licenses) { $Licenses -join ';' } else { '' }
 
 $rows = foreach ($i in $StartAt..($StartAt + $Count - 1)) {
