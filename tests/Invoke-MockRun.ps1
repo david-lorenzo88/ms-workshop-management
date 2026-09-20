@@ -323,6 +323,16 @@ $minimalEnv = @($global:MockState.Requests | Where-Object {
     })
 Assert ($minimalEnv.Count -eq 1) 'minimal CSV still templates the environment name'
 
+# A disabled step must not block the verdict - it did, before this was fixed.
+$ppOffConfig = Join-Path $workDir 'pp-off.json'
+$ppOff = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+$ppOff.powerPlatform.enabled = $false
+$ppOff | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ppOffConfig -Encoding utf8
+$ppOffResult = & (Join-Path $root 'src' 'Test-WorkshopSetup.ps1') -ConfigPath $ppOffConfig -AttendeeCount 10 6>$null
+$ppRows = @($ppOffResult | Where-Object { $_.Area -eq 'PowerPlatform' })
+Assert ($ppRows.Count -eq 1 -and $ppRows[0].Status -eq 'SKIP') 'disabled Power Platform step is skipped, not probed'
+Assert (@($ppOffResult | Where-Object { $_.Status -eq 'FAIL' }).Count -eq 0) 'disabling a step does not leave blocking failures'
+
 $pf = { param($name) @($preflight | Where-Object { $_.Check -eq $name }) | Select-Object -First 1 }
 Assert ((& $pf 'Token').Status -eq 'PASS') 'pre-flight acquires a Graph token'
 Assert ((& $pf 'Verified domains').Detail -match 'contoso\.onmicrosoft\.com') 'pre-flight lists verified domains only'

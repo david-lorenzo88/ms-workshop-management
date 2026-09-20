@@ -431,11 +431,21 @@ Then run 'az login' and try again.
     Write-WsLog "Requesting $ResourceUri token via the Azure CLI..." -Level Info -Context 'auth'
     $output = & az @arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
+        # Lead with the command to run: a trial Microsoft 365 tenant has no Azure
+        # subscription, and a plain 'az login' fails there, which is by far the
+        # most common cause of this.
         throw @"
-'az account get-access-token' failed for $ResourceUri.
+Run this, then try again:  az login --allow-no-subscriptions --tenant $TenantId
 
-If you are not signed in:      az login --tenant $TenantId
-If the tenant is wrong:        az login --tenant $TenantId --allow-no-subscriptions
+The Azure CLI could not get a token for $ResourceUri. A trial Microsoft 365
+tenant usually has no Azure subscription, and a plain 'az login' fails in that
+case - hence --allow-no-subscriptions.
+
+If it still fails after signing in, the Azure CLI is not pre-authorised for this
+audience in your tenant. That is not fixable from here; create the Developer
+environments in the Power Platform admin center instead (New > Developer, then
+"Create on behalf" and pick the owner), or have attendees create their own at
+make.powerapps.com, and run provisioning with -Steps User,License,BusinessCentral.
 
 Azure CLI said: $($output -join ' ')
 "@

@@ -85,8 +85,10 @@ function Invoke-Check {
         return $true
     }
     catch {
-        $message = $_.Exception.Message -replace '\s+', ' '
-        if ($message.Length -gt 200) { $message = $message.Substring(0, 200) + '...' }
+        # Keep the first line intact - these messages lead with the fix.
+        $message = ($_.Exception.Message -split "`n")[0].Trim()
+        if ([string]::IsNullOrWhiteSpace($message)) { $message = $_.Exception.Message -replace '\s+', ' ' }
+        if ($message.Length -gt 300) { $message = $message.Substring(0, 300) + '...' }
         Add-Check -Area $Area -Name $Name -Status 'FAIL' -Detail $message -Remedy $Remedy
         return $false
     }
@@ -202,6 +204,12 @@ if ($graphOk) {
 Write-Host ''
 Write-Host 'Power Platform (Developer environments)' -ForegroundColor Cyan
 
+# Honour the config: a disabled step must not block the verdict.
+if (-not [bool](Cfg 'powerPlatform.enabled' $true)) {
+    Add-Check -Area 'PowerPlatform' -Name 'Step' -Status 'SKIP' -Detail 'disabled in config'
+    $bapOk = $false
+}
+else {
 $bapOk = Invoke-Check -Area 'PowerPlatform' -Name 'Token' -Remedy @'
 AADSTS650057 means this app registration cannot request the BAP audience.
 Environment CREATION exists only on the legacy BAP API, which Microsoft does not
@@ -231,6 +239,7 @@ Under app-only auth the service principal must be registered with:
         $developer = @($environments | Where-Object { $_.properties.environmentSku -eq 'Developer' })
         "$($environments.Count) environment(s), $($developer.Count) Developer"
     } | Out-Null
+}
 }
 
 # --- Business Central ----------------------------------------------------------
