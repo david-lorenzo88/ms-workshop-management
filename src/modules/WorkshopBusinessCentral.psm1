@@ -194,6 +194,12 @@ function Wait-WsBcUserCohort {
             if ($missing.Count -eq 0 -and $wanted.Count -gt 0) {
                 Write-WsLog "All $($wanted.Count) user(s) are present in Business Central." -Level Success -Context 'bc'
             }
+            elseif ($missing.Count -gt 0) {
+                # Distinguish "sync did nothing" from "sync ran but these users
+                # were not eligible": the total tells you which.
+                $distinct = @($map.Values | Sort-Object -Property userSecurityId -Unique).Count
+                Write-WsLog "Business Central currently holds $distinct user(s) in total; $($missing.Count) of the roster are absent." -Level Warn -Context 'bc'
+            }
             return [pscustomobject]@{ Map = $map; Found = $found; Missing = $missing }
         }
 
@@ -252,9 +258,11 @@ function Sync-WsBcUsersFromEntra {
     }
     if ($null -eq $anchor) { $anchor = $existing | Select-Object -First 1 }
 
-    # The synchronous variant is meant for delegated admins; the async one
-    # schedules a background job. Try async first, then fall back.
-    foreach ($action in 'getNewUsersFromOffice365Async', 'getNewUsersFromOffice365') {
+    # Synchronous first: it does the work before returning, so a success means
+    # the users really are in. The async variant only schedules a background job
+    # and answers 204 immediately, which looks like success even when the job
+    # never delivers.
+    foreach ($action in 'getNewUsersFromOffice365', 'getNewUsersFromOffice365Async') {
         $uri = '{0}/companies({1})/users({2})/Microsoft.NAV.{3}' -f `
             $automationBase, $CompanyId, $anchor.userSecurityId, $action
 
