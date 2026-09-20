@@ -120,6 +120,11 @@ function global:Invoke-WebRequest {
             foreach ($add in $parsedBody.addLicenses) { $global:MockState.Licenses[$id] += $add.skuId }
             return reply 200 @{ id = $id }
         }
+        '/v1\.0/users/([^/?]+)$' {
+            # PATCH on a user: password reset lands here.
+            if ($Method -eq 'PATCH') { return reply 204 $null }
+            return reply 200 @{ id = $Matches[1] }
+        }
         '/v1\.0/users/([^/?]+)\?\$select' {
             $upn = [uri]::UnescapeDataString($Matches[1])
             if ($global:MockState.Users.ContainsKey($upn)) { return reply 200 $global:MockState.Users[$upn] }

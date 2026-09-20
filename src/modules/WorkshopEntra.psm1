@@ -213,6 +213,41 @@ function Get-WsUserLicense {
     return @($result.Content.value | ForEach-Object { $_.skuPartNumber })
 }
 
+function Set-WsUserPassword {
+    <#
+    .SYNOPSIS
+        Sets a user's password to a known value and returns it.
+    .DESCRIPTION
+        Entra never discloses an existing password, so the only way to produce a
+        definitive credential list for accounts created earlier is to set fresh
+        ones. Requires a privileged role (Global Administrator or User
+        Administrator) on the signed-in account.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [string]$Password,
+        [ValidateRange(12, 128)][int]$PasswordLength = 16,
+        [bool]$ForceChangePasswordNextSignIn = $false
+    )
+
+    $user = Get-WsEntraUser -UserPrincipalName $UserPrincipalName
+    if ($null -eq $user) { throw "User '$UserPrincipalName' was not found." }
+
+    $newPassword = if ([string]::IsNullOrWhiteSpace($Password)) { New-WsPassword -Length $PasswordLength } else { $Password }
+
+    if (-not $PSCmdlet.ShouldProcess($UserPrincipalName, 'Reset password')) {
+        return [pscustomobject]@{ UserPrincipalName = $UserPrincipalName; Password = $null; Reset = $false }
+    }
+
+    Invoke-WsRestMethod -Uri ('{0}/users/{1}' -f $script:GraphBase, $user.id) -Method PATCH `
+        -Headers (Get-WsAuthHeader -Resource Graph) `
+        -Body @{ passwordProfile = @{ password = $newPassword; forceChangePasswordNextSignIn = $ForceChangePasswordNextSignIn } } `
+        -Context 'entra' | Out-Null
+
+    return [pscustomobject]@{ UserPrincipalName = $UserPrincipalName; Password = $newPassword; Reset = $true }
+}
+
 function Get-WsTenantDomain {
     <#
     .SYNOPSIS
@@ -260,5 +295,5 @@ function Get-WsTenantInfo {
 }
 
 Export-ModuleMember -Function Get-WsEntraUser, New-WsEntraUser, Get-WsSubscribedSku, Set-WsUserLicense,
-    Get-WsUserLicense,
+    Get-WsUserLicense, Set-WsUserPassword,
     Get-WsTenantDomain, Get-WsTenantInfo
