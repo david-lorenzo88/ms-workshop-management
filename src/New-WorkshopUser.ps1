@@ -439,6 +439,7 @@ if ('PowerPlatform' -in $Steps -and [bool](Get-Setting $config 'powerPlatform.en
                 -OwnerObjectId $item.EntraUser.id `
                 -TenantId      $resolvedTenantId `
                 -Location      (Get-Setting $config 'powerPlatform.location' 'europe') `
+                -MacroRegion   (Get-Setting $config 'powerPlatform.macroRegion') `
                 -CurrencyCode  (Get-Setting $config 'powerPlatform.currencyCode' 'EUR') `
                 -BaseLanguage  ([int](Get-Setting $config 'powerPlatform.baseLanguage' 1033)) `
                 -Wait:([bool](Get-Setting $config 'powerPlatform.waitForProvisioning' $false)) `

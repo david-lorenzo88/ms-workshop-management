@@ -29,6 +29,7 @@ $global:MockState = @{
     Licenses     = @{}
     BlankCompanyDisplayName = $false
     SyncBoundToCollectionOnly = $false
+    TenantProvisioningMode = 'location'
 }
 
 # Pre-seed Business Central with the synced users so the wait loop resolves.
@@ -139,6 +140,23 @@ function global:Invoke-WebRequest {
         }
 
         # ---- Power Platform (BAP) ----
+        'BusinessAppPlatform/locations' {
+            if ($global:MockState.TenantProvisioningMode -eq 'macroRegion') {
+                return reply 200 @{
+                    tenantProvisioningMode = 'macroRegion'
+                    macroRegions           = @(
+                        @{ macroRegionId = 'europe'; displayName = 'Europe' }
+                        @{ macroRegionId = 'unitedstates'; displayName = 'United States' }
+                    )
+                    value                  = @(@{ name = 'europe' }, @{ name = 'unitedstates' })
+                }
+            }
+            return reply 200 @{
+                tenantProvisioningMode = 'region'
+                macroRegions           = @()
+                value                  = @(@{ name = 'europe' }, @{ name = 'unitedstates' })
+            }
+        }
         'scopes/admin/environments' { return reply 200 @{ value = @($global:MockState.Environments) } }
         'BusinessAppPlatform/environments\?api-version' {
             if ($Method -ne 'POST') { return reply 200 @{ value = @() } }
@@ -307,6 +325,15 @@ $permPosts = $global:MockState.Requests | Where-Object { $_.Method -eq 'POST' -a
 Assert (@($permPosts | Where-Object { $_.Body.roleId -eq 'SUPER' }).Count -eq 0) 'SUPER was never assigned'
 Assert (@($permPosts).Count -eq 2) 'exactly 2 permission assignments (carla skipped)'
 
+# Placement: location and macroRegion are mutually exclusive. A tenant that
+# provisions by macro region rejects `location` with MacroRegionRequired, and a
+# payload carrying both is refused as AmbiguousLocationSpecification.
+$locationPosts = @($global:MockState.Requests | Where-Object {
+        $_.Method -eq 'POST' -and $_.Uri -match 'BusinessAppPlatform/environments\?'
+    })
+Assert (@($locationPosts | Where-Object { $_.Body.PSObject.Properties.Name -contains 'location' }).Count -eq $locationPosts.Count) 'location-mode tenant sends location'
+Assert (@($locationPosts | Where-Object { $_.Body.PSObject.Properties.Name -contains 'macroRegion' }).Count -eq 0) 'location-mode tenant never sends macroRegion'
+
 # Dev environments must be created on behalf of the attendee, not the admin.
 # Scoped to the three roster attendees so later passes cannot skew the counts.
 $rosterEnvNames = @('DEV - Anna Smith', 'DEV - Ben Jones', 'DEV - Carla Ruiz')
@@ -458,6 +485,34 @@ try {
 }
 catch { $listError = $_.Exception.Message }
 Assert ($listError -match "'Nope' is not a valid value for -Steps" -and $listError -match 'Valid values:') 'invalid list value names the offender and the allowed set'
+
+# Now the same creation against a macro-region tenant.
+$global:MockState.TenantProvisioningMode = 'macroRegion'
+$global:MockState.Requests.Clear()
+Import-Module (Join-Path $root 'src' 'modules' 'WorkshopPowerPlatform.psm1') -Force -DisableNameChecking  # drop the cached locations
+Initialize-WsAuth -TenantId '11111111-1111-1111-1111-111111111111' `
+    -ClientId '22222222-2222-2222-2222-222222222222' -Mode DeviceCode | Out-Null
+
+$mrResult = New-WsDeveloperEnvironment -DisplayName 'DEV - Macro Region' `
+    -OwnerObjectId 'aad-macro' -TenantId '11111111-1111-1111-1111-111111111111' -Location 'europe'
+$mrPost = @($global:MockState.Requests | Where-Object {
+        $_.Method -eq 'POST' -and $_.Uri -match 'BusinessAppPlatform/environments\?'
+    }) | Select-Object -First 1
+
+Assert ($null -ne $mrPost) 'macro-region tenant still issues a create'
+Assert ($mrPost.Body.PSObject.Properties.Name -contains 'macroRegion') 'macro-region tenant sends macroRegion'
+Assert ($mrPost.Body.PSObject.Properties.Name -notcontains 'location') 'macro-region tenant omits location (would be AmbiguousLocationSpecification)'
+Assert ($mrPost.Body.macroRegion -eq 'europe') 'a configured location naming a macro region is carried over'
+Assert ($mrPost.Body.properties.environmentSku -eq 'Developer') 'macro-region create still uses the Developer SKU'
+
+$mrError = $null
+try {
+    New-WsDeveloperEnvironment -DisplayName 'DEV - Bad Region' -OwnerObjectId 'aad-x' `
+        -TenantId '11111111-1111-1111-1111-111111111111' -MacroRegion 'atlantis' | Out-Null
+}
+catch { $mrError = $_.Exception.Message }
+Assert ($mrError -match 'not a valid macro region' -and $mrError -match 'europe') 'an invalid macro region is rejected with the valid list'
+$global:MockState.TenantProvisioningMode = 'location'
 
 Write-Host ''
 if ($failures.Count -gt 0) {

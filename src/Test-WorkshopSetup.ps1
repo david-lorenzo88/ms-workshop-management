@@ -268,6 +268,25 @@ Options, cheapest first:
 }
 
 if ($bapOk) {
+    Invoke-Check -Area 'PowerPlatform' -Name 'Environment placement' -Remedy @'
+Set the key this tenant actually uses. They are mutually exclusive: a macro
+region tenant rejects `location` with MacroRegionRequired, and sending both
+gives AmbiguousLocationSpecification.
+  pwsh ./src/Set-WorkshopConfig.ps1 -MacroRegion <id>
+'@ -Probe {
+        $placement = Get-WsPowerPlatformLocation
+        if ($placement.Mode -eq 'macroRegion') {
+            $ids = @($placement.MacroRegions | ForEach-Object { $_.Id })
+            $chosen = Cfg 'powerPlatform.macroRegion'
+            $resolved = Resolve-WsEnvironmentPlacement -Location (Cfg 'powerPlatform.location') -MacroRegion $chosen
+            "by macro region -> $($resolved.Value)  (available: $($ids -join ', '))"
+        }
+        else {
+            $resolved = Resolve-WsEnvironmentPlacement -Location (Cfg 'powerPlatform.location') -MacroRegion (Cfg 'powerPlatform.macroRegion')
+            "by location -> $($resolved.Value)"
+        }
+    } | Out-Null
+
     Invoke-Check -Area 'PowerPlatform' -Name 'List environments' -Remedy @'
 Under delegated auth you must be Global or Power Platform Administrator.
 Under app-only auth the service principal must be registered with:

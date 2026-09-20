@@ -24,7 +24,9 @@
   "powerPlatform": {
     "enabled": true,
     "displayNameTemplate": "DEV - {DisplayName}",
+    "$comment_placement": "A tenant places environments either by location OR by macroRegion, never both. Test-WorkshopSetup.ps1 reports which mode this tenant uses and the valid values; set macroRegion and leave location alone if it says macro region.",
     "location": "europe",
+    "macroRegion": null,
     "currencyCode": "EUR",
     "baseLanguage": 1033,
     "waitForProvisioning": false,

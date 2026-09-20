@@ -23,6 +23,110 @@ $script:BapApiVersion = '2021-04-01'
 # usedBy.type discriminator for a user principal in the BAP contract.
 $script:UsedByTypeUser = 1
 
+# The locations response is identical for every environment in a run, so it is
+# fetched once and reused across the roster.
+$script:LocationsCache = $null
+
+function Get-WsPowerPlatformLocation {
+    <#
+    .SYNOPSIS
+        Returns the tenant's environment placement options and provisioning mode.
+    .DESCRIPTION
+        A tenant places environments either by location or by macro region, and
+        the two are mutually exclusive: a macro region tenant rejects a payload
+        carrying `location` with MacroRegionRequired, and carrying both keys
+        gives AmbiguousLocationSpecification.
+    .OUTPUTS
+        PSCustomObject with Mode, Locations and MacroRegions.
+    #>
+    [CmdletBinding()]
+    param([switch]$Refresh)
+
+    if ($null -ne $script:LocationsCache -and -not $Refresh) { return $script:LocationsCache }
+
+    $uri = '{0}/locations?api-version={1}' -f $script:BapBase, $script:BapApiVersion
+    $content = (Invoke-WsRestMethod -Uri $uri -Headers (Get-WsAuthHeader -Resource PowerPlatform) -Context 'powerplatform').Content
+
+    $mode = 'location'
+    if ($null -ne $content -and $content.PSObject.Properties.Name -contains 'tenantProvisioningMode' -and
+        $content.tenantProvisioningMode -ceq 'macroRegion') {
+        # Compared case-sensitively: the API spells the classic mode in lower
+        # case and this one in camel case.
+        $mode = 'macroRegion'
+    }
+
+    $macroRegions = @()
+    if ($null -ne $content -and $content.PSObject.Properties.Name -contains 'macroRegions' -and $null -ne $content.macroRegions) {
+        $macroRegions = @($content.macroRegions | ForEach-Object {
+                [pscustomobject]@{ Id = $_.macroRegionId; DisplayName = $_.displayName }
+            })
+    }
+
+    $locations = @()
+    if ($null -ne $content -and $content.PSObject.Properties.Name -contains 'value' -and $null -ne $content.value) {
+        $locations = @($content.value | ForEach-Object { $_.name })
+    }
+
+    $script:LocationsCache = [pscustomobject]@{
+        Mode         = $mode
+        Locations    = $locations
+        MacroRegions = $macroRegions
+    }
+    return $script:LocationsCache
+}
+
+function Resolve-WsEnvironmentPlacement {
+    <#
+    .SYNOPSIS
+        Decides whether a create request should carry `location` or `macroRegion`,
+        and which value.
+    .OUTPUTS
+        PSCustomObject with Key and Value, ready to splat onto the request body.
+    #>
+    [CmdletBinding()]
+    param([string]$Location, [string]$MacroRegion)
+
+    $placement = Get-WsPowerPlatformLocation
+
+    if ($placement.Mode -ne 'macroRegion') {
+        if ([string]::IsNullOrWhiteSpace($Location)) {
+            throw "This tenant places environments by location, but none was configured. Set powerPlatform.location (available: $($placement.Locations -join ', '))."
+        }
+        if ($placement.Locations.Count -gt 0 -and $Location -notin $placement.Locations) {
+            throw "'$Location' is not a valid location for this tenant. Available: $($placement.Locations -join ', ')."
+        }
+        return [pscustomobject]@{ Key = 'location'; Value = $Location }
+    }
+
+    $validIds = @($placement.MacroRegions | ForEach-Object { $_.Id })
+
+    if (-not [string]::IsNullOrWhiteSpace($MacroRegion)) {
+        if ($validIds.Count -gt 0 -and $MacroRegion -notin $validIds) {
+            throw "'$MacroRegion' is not a valid macro region for this tenant. Available: $($validIds -join ', ')."
+        }
+        return [pscustomobject]@{ Key = 'macroRegion'; Value = $MacroRegion }
+    }
+
+    # A configured location that happens to name a macro region is almost
+    # certainly what was meant, so accept it rather than failing on a technicality.
+    if (-not [string]::IsNullOrWhiteSpace($Location) -and $Location -in $validIds) {
+        Write-WsLog "Tenant provisions by macro region; using macroRegion '$Location'." -Level Info -Context 'powerplatform'
+        return [pscustomobject]@{ Key = 'macroRegion'; Value = $Location }
+    }
+
+    if ($validIds.Count -eq 1) {
+        Write-WsLog "Tenant provisions by macro region; using the only one available, '$($validIds[0])'." -Level Info -Context 'powerplatform'
+        return [pscustomobject]@{ Key = 'macroRegion'; Value = $validIds[0] }
+    }
+
+    throw @"
+This tenant provisions environments by macro region, so 'location' cannot be used.
+Set powerPlatform.macroRegion to one of: $($validIds -join ', ')
+
+  pwsh ./src/Set-WorkshopConfig.ps1 -MacroRegion <id>
+"@
+}
+
 function Get-WsPowerPlatformEnvironment {
     <#
     .SYNOPSIS
@@ -114,6 +218,7 @@ function New-WsDeveloperEnvironment {
         [Parameter(Mandatory)][string]$OwnerObjectId,
         [Parameter(Mandatory)][string]$TenantId,
         [string]$Location = 'europe',
+        [string]$MacroRegion,
         [string]$CurrencyCode = 'EUR',
         [int]$BaseLanguage = 1033,
         [string]$Description,
@@ -127,7 +232,11 @@ function New-WsDeveloperEnvironment {
         return [pscustomobject]@{ Environment = $existing; Created = $false; EnvironmentName = $existing.name }
     }
 
-    if (-not $PSCmdlet.ShouldProcess($DisplayName, "Create Developer environment for $OwnerObjectId in $Location")) {
+    # Placement has to be resolved before ShouldProcess so -WhatIf reports where
+    # the environment would actually land.
+    $placement = Resolve-WsEnvironmentPlacement -Location $Location -MacroRegion $MacroRegion
+
+    if (-not $PSCmdlet.ShouldProcess($DisplayName, "Create Developer environment for $OwnerObjectId in $($placement.Key) $($placement.Value)")) {
         return [pscustomobject]@{ Environment = $null; Created = $false; EnvironmentName = $null }
     }
 
@@ -151,8 +260,12 @@ function New-WsDeveloperEnvironment {
 
     $uri = '{0}/environments?api-version={1}&retainOnProvisionFailure=false' -f $script:BapBase, $script:BapApiVersion
 
+    # Exactly one placement key: carrying both gives AmbiguousLocationSpecification.
+    $body = @{ properties = $properties }
+    $body[$placement.Key] = $placement.Value
+
     $response = Invoke-WsRestMethod -Uri $uri -Method POST -Headers (Get-WsAuthHeader -Resource PowerPlatform) `
-        -Body @{ location = $Location; properties = $properties } -TolerateStatus @(403) -Context 'powerplatform'
+        -Body $body -TolerateStatus @(403) -Context 'powerplatform'
 
     if ($response.StatusCode -eq 403) {
         throw @"
@@ -200,4 +313,5 @@ Service response: $(ConvertTo-WsRedactedString $response.RawBody)
     return [pscustomobject]@{ Environment = $environment; Created = $true; EnvironmentName = $environmentName }
 }
 
-Export-ModuleMember -Function Get-WsPowerPlatformEnvironment, New-WsDeveloperEnvironment, Wait-WsEnvironmentProvisioning
+Export-ModuleMember -Function Get-WsPowerPlatformEnvironment, New-WsDeveloperEnvironment, Wait-WsEnvironmentProvisioning,
+    Get-WsPowerPlatformLocation, Resolve-WsEnvironmentPlacement

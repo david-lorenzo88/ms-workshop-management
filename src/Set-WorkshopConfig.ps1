@@ -35,6 +35,7 @@ param(
     [AllowEmptyString()][string]$CompanyName,
     [string[]]$PermissionSets,
     [string]$PowerPlatformLocation,
+    [string]$MacroRegion,
     [switch]$DisablePowerPlatform,
     [switch]$EnablePowerPlatform,
     [switch]$DisableBusinessCentral,
@@ -105,6 +106,7 @@ if ($PSBoundParameters.ContainsKey('EnvironmentName'))       { Set-Value 'busine
 if ($PSBoundParameters.ContainsKey('CompanyName'))           { Set-Value 'businessCentral.companyName' $CompanyName }
 if ($PSBoundParameters.ContainsKey('PermissionSets'))        { Set-Value 'businessCentral.permissionSets' @($PermissionSets) }
 if ($PSBoundParameters.ContainsKey('PowerPlatformLocation')) { Set-Value 'powerPlatform.location' $PowerPlatformLocation }
+if ($PSBoundParameters.ContainsKey('MacroRegion'))            { Set-Value 'powerPlatform.macroRegion' $MacroRegion }
 if ($DisablePowerPlatform)   { Set-Value 'powerPlatform.enabled' $false }
 if ($EnablePowerPlatform)    { Set-Value 'powerPlatform.enabled' $true }
 if ($DisableBusinessCentral) { Set-Value 'businessCentral.enabled' $false }
@@ -131,6 +133,8 @@ if ($Show -or $changes.Count -gt 0) {
         usageLocation     = Get-Current 'user.usageLocation'
         licences          = (@(Get-Current 'licenses.skuPartNumbers') -join ', ')
         powerPlatform     = Get-Current 'powerPlatform.enabled'
+        ppLocation        = Get-Current 'powerPlatform.location'
+        ppMacroRegion     = Get-Current 'powerPlatform.macroRegion'
         bcEnabled         = Get-Current 'businessCentral.enabled'
         bcEnvironment     = Get-Current 'businessCentral.environmentName'
         bcCompany         = Get-Current 'businessCentral.companyName'
