@@ -1,0 +1,316 @@
+#Requires -Version 7.0
+<#
+.SYNOPSIS
+    Offline end-to-end exercise of New-WorkshopUser.ps1 against a mocked Microsoft API.
+.DESCRIPTION
+    Replaces Invoke-WsRestMethod with an in-memory router that serves canned
+    Graph / BAP / Business Central responses and records every request. This
+    verifies orchestration, idempotency and reporting without a live tenant.
+    Run it with: pwsh -File tests/Invoke-MockRun.ps1
+#>
+
+param([switch]$SecondPass)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$root = Split-Path -Parent $PSScriptRoot
+foreach ($module in 'WorkshopCommon', 'WorkshopAuth', 'WorkshopEntra', 'WorkshopPowerPlatform', 'WorkshopBusinessCentral') {
+    Import-Module (Join-Path $root 'src' 'modules' "$module.psm1") -Force -DisableNameChecking
+}
+
+$global:MockState = @{
+    Requests     = [System.Collections.Generic.List[object]]::new()
+    Users        = @{}
+    Environments = [System.Collections.Generic.List[object]]::new()
+    BcUsers      = @{}
+    BcPerms      = @{}
+    Licenses     = @{}
+}
+
+# Pre-seed Business Central with the synced users so the wait loop resolves.
+$global:MockState.BcUsers['anna.smith@contoso.onmicrosoft.com'] = @{ userSecurityId = 'bc000001-0000-0000-0000-000000000001'; userName = 'anna.smith@contoso.onmicrosoft.com'; displayName = 'Anna Smith'; state = 'Enabled' }
+$global:MockState.BcUsers['ben.jones@contoso.onmicrosoft.com']  = @{ userSecurityId = 'bc000002-0000-0000-0000-000000000002'; userName = 'BEN.JONES@CONTOSO.ONMICROSOFT.COM'; displayName = 'Ben Jones'; state = 'Enabled' }
+# carla is deliberately absent: exercises the "not synced yet" branch.
+
+<#
+    The mock shadows Invoke-WebRequest rather than Invoke-WsRestMethod, for two
+    reasons: the script under test re-imports its modules with -Force (which would
+    discard a mock placed over a module-exported function), and intercepting at the
+    HTTP layer keeps the real request building, status handling and JSON parsing in
+    the code path under test. Functions outrank cmdlets in PowerShell command
+    resolution, so this definition wins over the built-in.
+#>
+function global:Invoke-WebRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [string]$Method = 'GET',
+        [hashtable]$Headers = @{},
+        [object]$Body,
+        [string]$ContentType,
+        [int]$TimeoutSec,
+        [switch]$SkipHttpErrorCheck,
+        [int]$MaximumRedirection
+    )
+
+    $parsedBody = $null
+    if ($Body -is [string] -and $Body.TrimStart().StartsWith('{')) {
+        try { $parsedBody = $Body | ConvertFrom-Json -Depth 30 } catch { $parsedBody = $Body }
+    }
+    elseif ($null -ne $Body) { $parsedBody = $Body }
+
+    $global:MockState.Requests.Add([pscustomobject]@{ Method = $Method; Uri = $Uri; Body = $parsedBody })
+
+    function reply($status, $content) {
+        [pscustomobject]@{
+            StatusCode = $status
+            Content    = if ($null -eq $content) { '' } else { ($content | ConvertTo-Json -Depth 20 -Compress) }
+            Headers    = @{}
+        }
+    }
+
+    switch -Regex ($Uri) {
+
+        # ---- token endpoint ----
+        'oauth2/v2\.0/token' { return reply 200 @{ access_token = 'mock.token.value'; expires_in = 3600 } }
+
+        # ---- Microsoft Graph ----
+        '/v1\.0/subscribedSkus' {
+            return reply 200 @{ value = @(
+                    @{ skuId = 'sku-bc-premium'; skuPartNumber = 'DYN365_BUSCENTRAL_PREMIUM'; prepaidUnits = @{ enabled = 25 }; consumedUnits = 3; capabilityStatus = 'Enabled' }
+                    @{ skuId = 'sku-pa-dev'; skuPartNumber = 'POWERAPPS_DEV'; prepaidUnits = @{ enabled = 10000 }; consumedUnits = 5; capabilityStatus = 'Enabled' }
+                    @{ skuId = 'sku-exhausted'; skuPartNumber = 'POWER_BI_PRO'; prepaidUnits = @{ enabled = 2 }; consumedUnits = 2; capabilityStatus = 'Enabled' }
+                ) }
+        }
+        '/v1\.0/users/([^/?]+)/licenseDetails' {
+            $id = $Matches[1]
+            $held = if ($global:MockState.Licenses.ContainsKey($id)) { $global:MockState.Licenses[$id] } else { @() }
+            return reply 200 @{ value = @($held | ForEach-Object { @{ skuId = $_ } }) }
+        }
+        '/v1\.0/users/([^/?]+)/assignLicense' {
+            $id = $Matches[1]
+            if (-not $global:MockState.Licenses.ContainsKey($id)) { $global:MockState.Licenses[$id] = @() }
+            foreach ($add in $parsedBody.addLicenses) { $global:MockState.Licenses[$id] += $add.skuId }
+            return reply 200 @{ id = $id }
+        }
+        '/v1\.0/users/([^/?]+)\?\$select' {
+            $upn = [uri]::UnescapeDataString($Matches[1])
+            if ($global:MockState.Users.ContainsKey($upn)) { return reply 200 $global:MockState.Users[$upn] }
+            return reply 404 @{ error = @{ code = 'Request_ResourceNotFound' } }
+        }
+        '/v1\.0/users$' {
+            if ($Method -ne 'POST') { return reply 200 @{ value = @() } }
+            $upn = $parsedBody.userPrincipalName
+            $user = @{
+                id                = ('aad-' + ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+                userPrincipalName = $upn
+                displayName       = $parsedBody.displayName
+                accountEnabled    = $true
+                usageLocation     = $parsedBody.usageLocation
+            }
+            $global:MockState.Users[$upn] = $user
+            return reply 201 $user
+        }
+
+        # ---- Power Platform (BAP) ----
+        'scopes/admin/environments' { return reply 200 @{ value = @($global:MockState.Environments) } }
+        'BusinessAppPlatform/environments\?api-version' {
+            if ($Method -ne 'POST') { return reply 200 @{ value = @() } }
+            $env = @{
+                name       = ('env-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+                properties = @{
+                    displayName       = $parsedBody.properties.displayName
+                    environmentSku    = $parsedBody.properties.environmentSku
+                    usedBy            = $parsedBody.properties.usedBy
+                    provisioningState = 'Succeeded'
+                }
+            }
+            $global:MockState.Environments.Add([pscustomobject]$env)
+            return reply 201 $env
+        }
+
+        # ---- Business Central: admin center ----
+        '/admin/v2\.\d+/applications/[^/]+/environments/([^/?]+)' {
+            return reply 200 @{ name = [uri]::UnescapeDataString($Matches[1]); type = 'Sandbox'; status = 'Active'; countryCode = 'ES' }
+        }
+
+        # ---- Business Central: automation API ----
+        'automation/v2\.0/companies$' {
+            return reply 200 @{ value = @(@{ id = 'c0000001-0000-0000-0000-00000000000c'; name = 'CRONUS'; displayName = 'CRONUS USA, Inc.' }) }
+        }
+        'getNewUsersFromOffice365Async' { return reply 200 @{ status = 'Scheduled' } }
+        'companies\([^)]+\)/users$' { return reply 200 @{ value = @($global:MockState.BcUsers.Values) } }
+        'companies\([^)]+\)/permissionSets' {
+            return reply 200 @{ value = @(
+                    @{ id = 'D365 FULL ACCESS'; displayName = 'Dyn. 365 Full Access'; scope = 'System' }
+                    @{ id = 'D365 BASIC'; displayName = 'Dyn. 365 Basic'; scope = 'System' }
+                    @{ id = 'MCP - ADMIN'; displayName = 'MCP Administrator'; scope = 'System' }
+                    @{ id = 'SUPER'; displayName = 'Super'; scope = 'System' }
+                ) }
+        }
+        'users\(([^)]+)\)/userPermissions' {
+            $sid = $Matches[1]
+            if ($Method -eq 'POST') {
+                if (-not $global:MockState.BcPerms.ContainsKey($sid)) { $global:MockState.BcPerms[$sid] = @() }
+                $global:MockState.BcPerms[$sid] += $parsedBody.roleId
+                return reply 201 @{ roleId = $parsedBody.roleId; userSecurityId = $sid; scope = 'System' }
+            }
+            $existing = if ($global:MockState.BcPerms.ContainsKey($sid)) { $global:MockState.BcPerms[$sid] } else { @() }
+            return reply 200 @{ value = @($existing | ForEach-Object { @{ roleId = $_; userSecurityId = $sid } }) }
+        }
+    }
+
+    throw "MOCK: no route for $Method $Uri"
+}
+
+# --- run -----------------------------------------------------------------------
+
+# Self-contained: build a throwaway config and output directory so the suite runs
+# with a bare `pwsh -File tests/Invoke-MockRun.ps1`.
+$workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ws-mock-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+$env:MOCK_OUT = Join-Path $workDir 'out'
+New-Item -ItemType Directory -Path $env:MOCK_OUT -Force | Out-Null
+$env:WORKSHOP_CLIENT_SECRET = 'mock-secret'
+
+$configPath = Join-Path $workDir 'workshop.config.json'
+$config = Get-Content -LiteralPath (Join-Path $root 'config' 'workshop.config.example.json') -Raw | ConvertFrom-Json
+$config.tenantId                                = 'aaaa1111-2222-3333-4444-555566667777'
+$config.businessCentral.waitForUserSyncMinutes  = 1
+$config.businessCentral.userSyncPollSeconds     = 1
+$config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $configPath -Encoding utf8
+
+$script = Join-Path $root 'src' 'New-WorkshopUser.ps1'
+Write-Host "Working directory: $workDir" -ForegroundColor DarkGray
+
+Write-Host "`n########## PASS 0: -WhatIf must not mutate anything ##########`n" -ForegroundColor Magenta
+& $script -ConfigPath $configPath -UserPrincipalName 'dryrun@contoso.onmicrosoft.com' -DisplayName 'Dry Run' `
+    -OutputDirectory $env:MOCK_OUT -LogLevel Warn -WhatIf 3>$null | Out-Null
+
+# Preference variables do not cross module boundaries, so -WhatIf reaching the
+# module functions is easy to break. This guards that regression.
+$whatIfMutations = @($global:MockState.Requests | Where-Object {
+        $_.Method -in 'POST', 'PATCH', 'PUT', 'DELETE' -and $_.Uri -notmatch 'oauth2'
+    })
+$whatIfFiles = @(Get-ChildItem -Path $env:MOCK_OUT -File -ErrorAction SilentlyContinue)
+$global:MockState.Requests.Clear()
+
+Write-Host "`n########## PASS 1: fresh provisioning ##########`n" -ForegroundColor Magenta
+$pass1 = & $script -ConfigPath $configPath -Csv (Join-Path $root 'data' 'attendees.example.csv') `
+    -OutputDirectory $env:MOCK_OUT -LogLevel Info
+
+Write-Host "`n########## PASS 2: re-run (idempotency) ##########`n" -ForegroundColor Magenta
+$pass2 = & $script -ConfigPath $configPath -Csv (Join-Path $root 'data' 'attendees.example.csv') `
+    -OutputDirectory $env:MOCK_OUT -LogLevel Info
+
+Write-Host "`n########## PASS 3: CSV with only the required columns ##########`n" -ForegroundColor Magenta
+# Set-StrictMode makes a missing optional column a terminating error, so a
+# two-column roster is a genuine regression risk.
+$minimalCsv = Join-Path $env:MOCK_OUT 'minimal.csv'
+"UserPrincipalName,DisplayName`nminimal.user@contoso.onmicrosoft.com,Minimal User" |
+    Set-Content -LiteralPath $minimalCsv -Encoding utf8
+
+$pass3 = & $script -ConfigPath $configPath -Csv $minimalCsv -OutputDirectory $env:MOCK_OUT -LogLevel Warn
+
+# --- assertions ------------------------------------------------------------------
+
+Write-Host "`n########## ASSERTIONS ##########`n" -ForegroundColor Magenta
+$failures = [System.Collections.Generic.List[string]]::new()
+function Assert($condition, $label) {
+    if ($condition) { Write-Host "  PASS  $label" -ForegroundColor Green }
+    else { Write-Host "  FAIL  $label" -ForegroundColor Red; $script:failures.Add($label) }
+}
+
+Assert ($whatIfMutations.Count -eq 0) "-WhatIf issued no mutating API calls (saw $($whatIfMutations.Count))"
+Assert ($whatIfFiles.Count -eq 0) "-WhatIf wrote no files (saw $($whatIfFiles.Count))"
+Assert ($pass1.Count -eq 3) 'pass 1 processed 3 attendees'
+Assert (@($pass1 | Where-Object { $_.Steps.User -eq 'Created' }).Count -eq 3) 'pass 1 created 3 Entra users'
+Assert (@($pass2 | Where-Object { $_.Steps.User -eq 'AlreadyExists' }).Count -eq 3) 'pass 2 detected all users already exist'
+Assert (@($pass2 | Where-Object { $_.Steps.License -eq 'AlreadyLicensed' }).Count -eq 3) 'pass 2 skipped already-assigned licences'
+Assert (@($pass2 | Where-Object { $_.Steps.PowerPlatform -eq 'AlreadyExists' }).Count -eq 3) 'pass 2 reused existing dev environments'
+
+$anna = $pass1 | Where-Object { $_.UserPrincipalName -like 'anna*' }
+Assert ($anna.Steps.BusinessCentral -like 'Granted*D365 FULL ACCESS*') 'anna granted D365 FULL ACCESS'
+Assert ($null -ne $anna.Password -and $anna.Password.Length -ge 20) 'anna received a generated password'
+
+$ben = $pass1 | Where-Object { $_.UserPrincipalName -like 'ben*' }
+Assert ($ben.Steps.BusinessCentral -like 'Granted*') 'ben matched BC user case-insensitively'
+
+$carla = $pass1 | Where-Object { $_.UserPrincipalName -like 'carla*' }
+Assert ($carla.Steps.BusinessCentral -eq 'UserNotSynced') 'carla correctly reported as not yet synced in BC'
+Assert ($carla.Errors.Count -gt 0) 'carla carries an actionable error message'
+
+# No SUPER must ever be requested.
+$permPosts = $global:MockState.Requests | Where-Object { $_.Method -eq 'POST' -and $_.Uri -match 'userPermissions' }
+Assert (@($permPosts | Where-Object { $_.Body.roleId -eq 'SUPER' }).Count -eq 0) 'SUPER was never assigned'
+Assert (@($permPosts).Count -eq 2) 'exactly 2 permission assignments (carla skipped)'
+
+# Dev environments must be created on behalf of the attendee, not the admin.
+# Scoped to the three roster attendees so later passes cannot skew the counts.
+$rosterEnvNames = @('DEV - Anna Smith', 'DEV - Ben Jones', 'DEV - Carla Ruiz')
+$envPosts = @($global:MockState.Requests | Where-Object {
+        $_.Method -eq 'POST' -and $_.Uri -match 'BusinessAppPlatform/environments\?' -and
+        $_.Body.properties.displayName -in $rosterEnvNames
+    })
+Assert ($envPosts.Count -eq 3) '3 developer environments requested for the roster'
+Assert (@($envPosts | Where-Object { $_.Body.properties.environmentSku -eq 'Developer' }).Count -eq 3) 'all environments use the Developer SKU'
+Assert (@($envPosts | Where-Object { $_.Body.properties.usedBy.id -like 'aad-*' -and $_.Body.properties.usedBy.type -eq 1 }).Count -eq 3) 'all environments carry usedBy (on behalf of attendee)'
+
+# Ben's per-row licence override must win over the config default.
+$benId = ($global:MockState.Users['ben.jones@contoso.onmicrosoft.com']).id
+Assert ($global:MockState.Licenses[$benId] -contains 'sku-bc-premium') 'ben got the CSV-specified licences'
+
+# MCP configs land on disk for the users that reached the BC step.
+$mcpFiles = @(Get-ChildItem -Path $env:MOCK_OUT -Filter 'mcp-*.json' |
+    Where-Object { $_.Name -in 'mcp-anna.smith.json', 'mcp-ben.jones.json', 'mcp-carla.ruiz.json' })
+Assert ($mcpFiles.Count -eq 3) 'MCP client configs emitted for the roster'
+$annaMcp = Get-Content (Join-Path $env:MOCK_OUT 'mcp-anna.smith.json') -Raw | ConvertFrom-Json
+Assert ($annaMcp.mcpServers.businesscentral.url -eq 'https://mcp.businesscentral.dynamics.com') 'MCP config points at the BC MCP endpoint'
+Assert ($annaMcp.mcpServers.businesscentral.headers.EnvironmentName -eq 'SANDBOX-WORKSHOP') 'MCP config carries EnvironmentName header'
+
+# The summary table must render even with no console attached (width -1).
+$summaryText = $pass1 | Select-Object UserPrincipalName,
+@{ Name = 'User'; Expression = { $_.Steps.User } } | Format-Table -AutoSize | Out-String -Width 400
+Assert ($summaryText -match 'anna\.smith') 'summary table renders without a console'
+
+# Guardrail: administrative permission sets must be refused by default.
+$guardError = $null
+try {
+    Grant-WsBcPermission -EnvironmentName 'SANDBOX-WORKSHOP' `
+        -CompanyId 'c0000001-0000-0000-0000-00000000000c' `
+        -UserSecurityId 'bc000001-0000-0000-0000-000000000001' `
+        -PermissionSet @('SUPER') -ErrorAction Stop | Out-Null
+}
+catch { $guardError = $_.Exception.Message }
+Assert ($null -ne $guardError -and $guardError -match 'Refusing to assign administrative') 'SUPER is refused by default'
+
+$forced = Grant-WsBcPermission -EnvironmentName 'SANDBOX-WORKSHOP' `
+    -CompanyId 'c0000001-0000-0000-0000-00000000000c' `
+    -UserSecurityId 'bc000009-0000-0000-0000-000000000009' `
+    -PermissionSet @('SUPER') -AllowAdminPermissionSets
+Assert ($forced.Granted -contains 'SUPER') 'SUPER is allowed with the explicit opt-in'
+
+# A permission set that does not exist in the environment is reported, not fatal.
+$bogus = Grant-WsBcPermission -EnvironmentName 'SANDBOX-WORKSHOP' `
+    -CompanyId 'c0000001-0000-0000-0000-00000000000c' `
+    -UserSecurityId 'bc000001-0000-0000-0000-000000000001' `
+    -PermissionSet @('NOT A REAL SET')
+Assert ($bogus.Unavailable -contains 'NOT A REAL SET') 'unknown permission set is reported as unavailable'
+
+Assert ($pass3.Count -eq 1 -and $pass3[0].Steps.User -eq 'Created') 'minimal 2-column CSV provisions without error'
+Assert ($pass3[0].Errors -notmatch 'cannot be found on this object') 'minimal CSV does not trip StrictMode on absent columns'
+$minimalEnv = @($global:MockState.Requests | Where-Object {
+        $_.Method -eq 'POST' -and $_.Uri -match 'BusinessAppPlatform/environments\?' -and
+        $_.Body.properties.displayName -eq 'DEV - Minimal User'
+    })
+Assert ($minimalEnv.Count -eq 1) 'minimal CSV still templates the environment name'
+
+Write-Host ''
+if ($failures.Count -gt 0) {
+    Write-Host "$($failures.Count) ASSERTION(S) FAILED" -ForegroundColor Red
+    Write-Host "Artifacts left for inspection in $workDir" -ForegroundColor DarkGray
+    exit 1
+}
+Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host 'ALL ASSERTIONS PASSED' -ForegroundColor Green

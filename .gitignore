@@ -1,0 +1,17 @@
+# Generated attendee credentials and run reports - NEVER commit these
+output/
+*.credentials.csv
+*.credentials.json
+*.secrets.json
+
+# Real (non-example) configuration and attendee lists
+config/workshop.config.json
+config/*.local.json
+data/*.csv
+!data/*.example.csv
+
+# PowerShell / editor noise
+*.log
+.DS_Store
+.vscode/
+.idea/

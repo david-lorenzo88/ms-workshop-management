@@ -1,0 +1,4 @@
+UserPrincipalName,DisplayName,GivenName,Surname,JobTitle,Department,Licenses
+anna.smith@contoso.onmicrosoft.com,Anna Smith,Anna,Smith,Consultant,Workshop,
+ben.jones@contoso.onmicrosoft.com,Ben Jones,Ben,Jones,Developer,Workshop,DYN365_BUSCENTRAL_PREMIUM;POWERAPPS_DEV
+carla.ruiz@contoso.onmicrosoft.com,Carla Ruiz,Carla,Ruiz,Analyst,Workshop,

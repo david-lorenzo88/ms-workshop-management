@@ -1,0 +1,61 @@
+{
+  "$comment": "Copy to workshop.config.json and fill in. Never commit the real file - it is gitignored.",
+
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "clientId": "11111111-1111-1111-1111-111111111111",
+  "clientSecret": "env:WORKSHOP_CLIENT_SECRET",
+  "authMode": "ClientSecret",
+
+  "user": {
+    "usageLocation": "ES",
+    "passwordLength": 20,
+    "forceChangePasswordNextSignIn": true
+  },
+
+  "licenses": {
+    "$comment": "SKU part numbers as shown by Get-WsSubscribedSku. Business Central needs Essentials or Premium; the Power Apps Developer Plan is free and self-service.",
+    "skuPartNumbers": [
+      "DYN365_BUSCENTRAL_PREMIUM",
+      "POWERAPPS_DEV"
+    ],
+    "ignoreMissingSku": false
+  },
+
+  "powerPlatform": {
+    "enabled": true,
+    "displayNameTemplate": "DEV - {DisplayName}",
+    "location": "europe",
+    "currencyCode": "EUR",
+    "baseLanguage": 1033,
+    "waitForProvisioning": false,
+    "timeoutMinutes": 20
+  },
+
+  "businessCentral": {
+    "enabled": true,
+    "environmentName": "SANDBOX-WORKSHOP",
+    "applicationFamily": "BusinessCentral",
+    "companyName": "CRONUS USA, Inc.",
+
+    "$comment_permissions": "D365 FULL ACCESS = full access to all data within the licence, WITHOUT Business Central administration. SUPER would add system admin and is blocked unless allowAdminPermissionSets is true.",
+    "permissionSets": ["D365 FULL ACCESS"],
+    "assignToAllCompanies": true,
+    "allowAdminPermissionSets": false,
+    "grantMcpAdmin": false,
+    "waitForUserSyncMinutes": 10,
+    "userSyncPollSeconds": 20,
+
+    "mcp": {
+      "$comment": "clientId is the Entra app registered for MCP hosts: delegated permission Dynamics 365 Business Central > Financials.ReadWrite.All, public client, redirect URI http://localhost:33418/callback.",
+      "clientId": "22222222-2222-2222-2222-222222222222",
+      "configurationName": "WorkshopConfig",
+      "callbackPort": 33418,
+      "clientKind": "ClaudeCode",
+      "emitClientConfig": true
+    }
+  },
+
+  "output": {
+    "directory": "output"
+  }
+}
