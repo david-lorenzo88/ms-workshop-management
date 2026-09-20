@@ -99,6 +99,7 @@ if ($Reset) {
     Initialize-WsAuth -TenantId $tenant -ClientId $client -ClientSecret $secret -Mode $mode | Out-Null
 
     Write-WsLog "Resetting passwords for $($roster.Count) account(s)" -Level Step
+    $denied = $false
     foreach ($upn in $roster) {
         try {
             # Not $reset: PowerShell variable names are case-insensitive, so that
@@ -110,8 +111,15 @@ if ($Reset) {
             if ($outcome.Reset) { Write-WsLog "Reset $upn" -Level Success -Context 'entra' }
         }
         catch {
-            $results.Add([pscustomobject]@{ Email = $upn; Password = $null; Status = "Failed: $($_.Exception.Message)" })
-            Write-WsLog "Could not reset ${upn}: $($_.Exception.Message)" -Level Error -Context 'entra'
+            $detail = $_.Exception.Message
+            # Resetting someone else's password is gated behind a scope beyond
+            # User.ReadWrite.All, so say which one rather than leaving a 403.
+            if ($detail -match 'Authorization_RequestDenied') {
+                $denied = $true
+                $detail = 'Insufficient privileges (needs User-PasswordProfile.ReadWrite.All)'
+            }
+            $results.Add([pscustomobject]@{ Email = $upn; Password = $null; Status = "Failed: $detail" })
+            Write-WsLog "Could not reset ${upn}: $detail" -Level Error -Context 'entra'
         }
     }
 }
@@ -160,8 +168,24 @@ $results | Format-Table Email, Password, Status -AutoSize | Out-String -Width 40
 
 $missing = @($results | Where-Object { [string]::IsNullOrWhiteSpace($_.Password) })
 Write-WsLog "Written to $target" -Level Success
-if ($missing.Count -gt 0) {
-    Write-WsLog "$($missing.Count) account(s) have no password. Entra cannot disclose an existing one - re-run with -Reset to set fresh ones." -Level Warn
+
+if ($Reset -and $denied) {
+    Write-WsLog @'
+Every reset was refused. Updating another user's passwordProfile needs a scope
+beyond User.ReadWrite.All - being Global Administrator is not enough on its own.
+
+Add ONE of these DELEGATED permissions to the app registration, then grant
+admin consent:
+  User-PasswordProfile.ReadWrite.All   (narrow - password reset only)
+  Directory.AccessAsUser.All           (broad - acts as you across the directory)
+
+Or skip the reset entirely: this toolkit recorded each password when it created
+the account, so the list is already on disk.
+  pwsh ./src/Export-WorkshopCredentials.ps1 -Csv <roster.csv>
+'@ -Level Warn
+}
+elseif ($missing.Count -gt 0) {
+    Write-WsLog "$($missing.Count) account(s) have no password recorded. Entra cannot disclose an existing one - re-run with -Reset to set fresh ones." -Level Warn
 }
 Write-WsLog 'This file contains passwords. Distribute securely, then delete it.' -Level Warn
 Write-Host ''
